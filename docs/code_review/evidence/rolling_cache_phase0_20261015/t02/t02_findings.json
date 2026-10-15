@@ -1,0 +1,1074 @@
+{
+  "generated_at_utc": "2026-10-15T10:10:59.053Z",
+  "runs": {
+    "1012": {
+      "source_root": "/data/video-analytics/artifacts/pressure60_remux_refill_t4_4fps_1h_20261011_r2",
+      "report_sha256": "0506feb96e58dd6dd8aed44c899fcf50e39b3d55ceb4aeccad6ab5d156aecb1d",
+      "formal_window_utc": {
+        "status": "completed",
+        "duration_s": 3600,
+        "sample_count": 105,
+        "started_at": "2026-10-11T14:46:20.762412+00:00",
+        "ended_at": "2026-10-11T15:46:32.035005+00:00"
+      },
+      "config": {
+        "run_id": "pressure60_remux_refill_t4_4fps_1h_20261011_r2",
+        "stream_count": 60,
+        "rtsp_uri": "rtsp://192.168.1.100:18554/live/1080movie",
+        "fps": "4/1",
+        "min_fps": "99/25",
+        "batch_size": 4,
+        "pose_batch_size": 4,
+        "face_detector_batch_size": 4,
+        "face_embedding_batch_size": 16,
+        "face_infer_interval": 3,
+        "face_embedding_infer_interval": 3,
+        "max_parallel_streams": 64,
+        "batched_push_timeout": 10000,
+        "duration_s": 3600,
+        "sample_interval_s": 30,
+        "drain_s": 300,
+        "guard_wait_s": 1200,
+        "keep_evidence": -1,
+        "evidence_group_size": 60,
+        "evidence_policy_groups": [
+          [
+            5,
+            5
+          ]
+        ],
+        "pressure_materialization_event_type_quotas": "",
+        "pressure_disable_evidence_admission": false,
+        "pressure_algorithm_cooldown_s": 60,
+        "artifact_dir": "/data/video-analytics/artifacts/pressure60_remux_refill_t4_4fps_1h_20261011_r2",
+        "db_url": "postgresql://<redacted>@127.0.0.1:5439/video_analytics",
+        "redis_url": "redis://127.0.0.1:6396/0",
+        "api_base": "http://127.0.0.1:8090/api/v1",
+        "compose_file": "/home/user/video-analytics-pressure-remux-0523808/infra/docker-compose.pressure-main.yml",
+        "env_file": "/home/user/video-analytics-pressure-remux-0523808/infra/env/midterm.env",
+        "evidence_root": "/data/video-analytics/media/evidence",
+        "replay_epoch_root": "/data/video-analytics/media/replay-sink-output/midterm/epochs",
+        "force_runtime_restart": true,
+        "no_quiesce_before_guard": false,
+        "rtsp_republish_output_base": "",
+        "rtsp_republish_input_uri": "rtsp://192.168.1.100:18554/live/1080movie",
+        "rtsp_republish_mode": "copy",
+        "rtsp_republish_local_server": false,
+        "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+        "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+        "rtsp_republish_local_server_gateway": "",
+        "rtsp_republish_local_server_host_port": 18554,
+        "rtsp_republish_warmup_s": 10,
+        "rtsp_republish_readiness_timeout_s": 120,
+        "rtsp_republish_readiness_parallelism": 4,
+        "rtsp_republish_readiness_restart_attempts": 1,
+        "rtsp_republish_input_offset_s": 0,
+        "rtsp_republish_input_offset_step_s": 0,
+        "rtsp_republish_input_loop": false,
+        "rtsp_republish_h264_repeat_headers": false,
+        "max_send_failures": 0,
+        "max_exited_sources": 0,
+        "max_validate_seq_iq": 0,
+        "forwarder_null_sink": false,
+        "dual_shard_same_gpu": true,
+        "dual_shard_api": false,
+        "dual_shard_gpu": "0",
+        "dual_shard_source_mode": "balanced",
+        "evidence_shard_count": 4,
+        "rolling_cache_evidence": true,
+        "rolling_cache_enable_coverage_merge": false,
+        "cleanup": true,
+        "clear_existing_evidence": false,
+        "discard_pressure_results": false,
+        "rolling_cache_prefill_s": 25,
+        "rolling_cache_postfill_s": 25,
+        "rolling_cache_min_raw_fps": 20,
+        "pressure_source_visibility_timeout_s": 300,
+        "pressure_source_visibility_poll_s": 5,
+        "pressure_source_visibility_stable_samples": 2,
+        "pressure_source_visibility_restart_attempts": 1,
+        "pressure_source_ffmpeg_timeout_ms": 60000,
+        "pressure_source_ffmpeg_init_timeout_ms": 60000,
+        "pressure_source_start_stagger_s": 0.53,
+        "savant_ablation_stage": "full-evidence",
+        "savant_output_mode": "metadata-only",
+        "cpu_isolation_profile": "t4-16cpu-evidence",
+        "cuda_mps": true,
+        "mps_savant_active_thread_percentage": 45,
+        "mps_adaface_active_thread_percentage": 10,
+        "adaface_classifier_async": false,
+        "face_secondary_track_id": false,
+        "adaface_input_queue": false,
+        "adaface_crop_resize": false,
+        "adaface_pre_gate": false,
+        "adaface_decoupled": false,
+        "max_adaface_forwarder_send_failure_ratio": 0.005,
+        "adaface_decoupled_sharded": false,
+        "adaface_roi_redis": true,
+        "adaface_roi_batch_timeout_ms": 200,
+        "analysis_max_queue_age_ms": 30000,
+        "media_worker_materialization_max_active": 4,
+        "media_worker_rolling_remux_workers": 1,
+        "media_worker_segment_index_io_concurrency": 2,
+        "media_worker_db_index_io_concurrency": 0,
+        "media_worker_finalizer_workers": 4,
+        "media_worker_finalizer_process_workers": 4,
+        "media_worker_finalizer_queue_capacity": 4,
+        "media_worker_rolling_max_per_poll": 4,
+        "media_worker_completion_wake": true,
+        "pressure_pause_redis_rdb": false,
+        "pressure_tune_postgres_checkpoints": false,
+        "pressure_rolling_cache_host_root": "",
+        "pressure_rolling_cache_materialized_host_root": "",
+        "pressure_rolling_cache_retention_s": 600,
+        "preserve_warmup_results": true,
+        "pressure_sampling_start_event_ts_ms": 1791729980761,
+        "pressure_sampling_end_event_ts_ms": 1791733592035,
+        "rolling_cache_publication_workers": 1,
+        "rolling_cache_publication_commit_slots": 0,
+        "rolling_cache_publication_final_parent_group_limit": 1,
+        "rolling_cache_publication_file_sync_mode": "fsync",
+        "rolling_cache_publication_metadata_layout": "split"
+      },
+      "retention": {
+        "parameter": 600,
+        "pressure": 600,
+        "observed": {
+          "rolling-cache-sink-a": {
+            "ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS": "30",
+            "ROLLING_CACHE_RETENTION_SECONDS": "600",
+            "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
+            "ROLLING_CACHE_MAINTENANCE_STABILITY_AGE_SECONDS": "5",
+            "ROLLING_CACHE_MAINTENANCE_OWNER": "true"
+          },
+          "rolling-cache-sink-b": {
+            "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
+            "ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS": "30",
+            "ROLLING_CACHE_MAINTENANCE_STABILITY_AGE_SECONDS": "5",
+            "ROLLING_CACHE_RETENTION_SECONDS": "600",
+            "ROLLING_CACHE_MAINTENANCE_OWNER": "false"
+          }
+        }
+      },
+      "visibility": {
+        "root": "/home/user/video-analytics-fast/rolling-cache",
+        "source_prefix": "pressure60_remux_refill_t4_4fps_1h_20261011_r2_",
+        "segments_measured": 41161,
+        "metadata_files_scanned": 41161,
+        "metadata_visible_lag_s": {
+          "status": "measured",
+          "count": 41161,
+          "min": 0.577,
+          "p50": 0.642,
+          "p95": 1.344,
+          "p99": 3.917,
+          "max": 7.067
+        },
+        "snapshot_visible_at_buckets_first_utc": "2026-10-11T15:06:00+00:00",
+        "snapshot_visible_at_buckets_last_utc": "2026-10-11T15:46:30+00:00",
+        "host_override_env_record_missing": true,
+        "report_root_three_part_evidence_gate": "not satisfied: historical host override environment was not recorded",
+        "full_rate_gate_schema": [
+          {
+            "path": "rolling_cache_full_rate_gate",
+            "type": "dict",
+            "count": 10
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.expected_fps",
+            "value": 24
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.expected_fps_source",
+            "value": "rolling_cache_raw_input"
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.min_full_rate_fps",
+            "value": 21.6
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.configured_min_raw_fps",
+            "value": 20
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.min_full_rate_ratio",
+            "value": 0.9
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.observed_segment_frame_rate_p50",
+            "value": 24.265
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.segments_measured",
+            "value": 41161
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.source_count",
+            "value": 60
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.stream_count",
+            "value": 60
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.full_rate_ok",
+            "value": true
+          }
+        ]
+      },
+      "db_summary_before_cleanup": {
+        "cameras": 60,
+        "events": 11755,
+        "suppressed_events": 7459,
+        "unsuppressed_events": 4296,
+        "tasks": 4296,
+        "bundles": 4296,
+        "playable_bundles": 4296,
+        "behavior_video_playable_bundles": 2905,
+        "face_image_ready_bundles": 1391,
+        "watchlist_image_ready_bundles": 1391,
+        "covered_events": 0,
+        "covered_playable_events": 0,
+        "active_materialization_tasks": 0,
+        "ready_waiting_materialization_tasks": 0,
+        "unready_waiting_materialization_tasks": 0,
+        "distinct_events_with_playable_evidence": 4296,
+        "distinct_events_without_playable_evidence": 7459,
+        "covered_but_not_playable_distinct_events": 0,
+        "distinct_events_with_terminal_nonplayable_outcome": 7459,
+        "blocking_materialization_tasks": 0,
+        "expired_without_attempt_tasks": 0,
+        "active_materialization_leases": 0,
+        "finalizer_pending_tasks": 0,
+        "finalizer_pending_unleased_tasks": 0,
+        "finalizer_pending_leased_tasks": 0,
+        "task_statuses": [
+          {
+            "status": "materialized",
+            "materialization_status": "materialized",
+            "count": 4296
+          }
+        ],
+        "event_types": [
+          {
+            "event_type": "intrusion",
+            "count": 10105
+          },
+          {
+            "event_type": "watchlist_hit",
+            "count": 1650
+          }
+        ],
+        "adaface_roi": {
+          "observations": 41581,
+          "source_count": 60,
+          "embedding_norm_min": 0.9993960762252341,
+          "embedding_norm_max": 1.0006180642062295
+        }
+      },
+      "cleanup_schema": [
+        {
+          "path": "pressure_runtime_cleanup_after_restore.disabled_cameras",
+          "value": 60
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_rules",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_zones",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_cameras",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_events",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_face_observations",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_person_bbox_observations",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_evidence_paths",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.visual_results_retained",
+          "value": true
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.source_dirs",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.materialized_dirs",
+          "value": 0
+        }
+      ],
+      "publication_report_distributions": {
+        "rolling_cache_sink_a": {
+          "rolling_cache_publish_total_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 5.911,
+            "p50": 17.683,
+            "p95": 38.674,
+            "p99": 138.506,
+            "max": 5480.485
+          },
+          "rolling_cache_publish_metadata_fsync_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.999,
+            "p50": 3.109,
+            "p95": 11.425,
+            "p99": 109.308,
+            "max": 3688.131
+          },
+          "rolling_cache_publish_manifest_fsync_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.578,
+            "p50": 2.862,
+            "p95": 7.778,
+            "p99": 40.62,
+            "max": 2497.101
+          },
+          "rolling_cache_publish_staging_dir_fsync_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.011,
+            "p50": 0.131,
+            "p95": 0.689,
+            "p99": 1.816,
+            "max": 20.333
+          },
+          "rolling_cache_publish_parent_dir_fsync_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.06,
+            "p50": 1.597,
+            "p95": 6.245,
+            "p99": 21.815,
+            "max": 2449.669
+          },
+          "rolling_cache_publication_capacity_wait_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.002,
+            "p50": 0.01,
+            "p95": 0.015,
+            "p99": 0.02,
+            "max": 3.651
+          },
+          "rolling_cache_publication_queue_residence_ms": {
+            "status": "measured",
+            "count": 33094,
+            "min": 0.204,
+            "p50": 24.955,
+            "p95": 294.683,
+            "p99": 2880.496,
+            "max": 6440.797
+          }
+        },
+        "rolling_cache_sink_b": {
+          "rolling_cache_publish_total_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 4.84,
+            "p50": 17.659,
+            "p95": 38.903,
+            "p99": 138.094,
+            "max": 5474.373
+          },
+          "rolling_cache_publish_metadata_fsync_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.56,
+            "p50": 3.09,
+            "p95": 11.455,
+            "p99": 110.256,
+            "max": 2957.125
+          },
+          "rolling_cache_publish_manifest_fsync_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.513,
+            "p50": 2.875,
+            "p95": 7.754,
+            "p99": 43.794,
+            "max": 3641.057
+          },
+          "rolling_cache_publish_staging_dir_fsync_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.011,
+            "p50": 0.129,
+            "p95": 0.679,
+            "p99": 1.701,
+            "max": 18.621
+          },
+          "rolling_cache_publish_parent_dir_fsync_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.051,
+            "p50": 1.603,
+            "p95": 6.131,
+            "p99": 18.668,
+            "max": 2434.932
+          },
+          "rolling_cache_publication_capacity_wait_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.002,
+            "p50": 0.01,
+            "p95": 0.015,
+            "p99": 0.02,
+            "max": 8.864
+          },
+          "rolling_cache_publication_queue_residence_ms": {
+            "status": "measured",
+            "count": 33066,
+            "min": 0.175,
+            "p50": 26.962,
+            "p95": 321.433,
+            "p99": 2975.789,
+            "max": 6397.826
+          }
+        }
+      },
+      "remux_report": {
+        "status": "measured",
+        "count": 3025,
+        "min": 327,
+        "p50": 676,
+        "p95": 928.8,
+        "p99": 1067.52,
+        "max": 2621
+      },
+      "sample_summary": {
+        "sample_count": 105,
+        "max_queue_depth": 6557,
+        "max_forwarder_queue_depth": 6557,
+        "max_forwarder_queue_depth_instantaneous": 6980,
+        "max_adaface_forwarder_queue_depth": 0,
+        "max_raw_forwarder_queue_depth": 29,
+        "steady_effective_fps_sample_count": 104,
+        "steady_effective_fps_method": "savant_frames_seen_counter_delta",
+        "steady_window_effective_fps_mean": 3.9919,
+        "steady_counter_effective_fps": 3.9468,
+        "steady_effective_fps_mean": 3.9468,
+        "minimum_effective_fps": 3.96,
+        "steady_effective_fps_meets_minimum": false,
+        "steady_effective_fps_target_ratio": 0.9867
+      },
+      "analysis_code_evidence": {
+        "count": 105,
+        "first": "runtime_000.json",
+        "metric_name_occurrences": {},
+        "metric_name_samples": [],
+        "shard_queue_max_initial_parse": {
+          "unknown": 3790
+        }
+      },
+      "non_materialized_details": {
+        "source_file": "non_materialized_task_details.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "count": 0,
+        "key_counts": {},
+        "groups": [],
+        "last_reason_fields_present": [],
+        "attempts_distribution": {
+          "count": 0
+        }
+      },
+      "stop_gate": null
+    },
+    "1013": {
+      "source_root": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+      "report_sha256": "7287175334e90507666883efc4948a95169fc5b4ac1dfe771b4289b2d021c625",
+      "formal_window_utc": {
+        "status": "completed",
+        "duration_s": 3600,
+        "sample_count": 98,
+        "started_at": "2026-10-12T21:34:18.482326+00:00",
+        "ended_at": "2026-10-12T22:34:49.666642+00:00"
+      },
+      "config": {
+        "run_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+        "stream_count": 60,
+        "rtsp_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+        "fps": "4/1",
+        "min_fps": "99/25",
+        "batch_size": 4,
+        "pose_batch_size": 4,
+        "face_detector_batch_size": 4,
+        "face_embedding_batch_size": 16,
+        "face_infer_interval": 4,
+        "face_embedding_infer_interval": 4,
+        "max_parallel_streams": 64,
+        "batched_push_timeout": 40000,
+        "duration_s": 3600,
+        "sample_interval_s": 30,
+        "drain_s": 600,
+        "guard_wait_s": 1200,
+        "keep_evidence": -1,
+        "evidence_group_size": 10,
+        "evidence_policy_groups": [
+          [
+            2,
+            2
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            5,
+            5
+          ],
+          [
+            8,
+            8
+          ],
+          [
+            10,
+            10
+          ],
+          [
+            15,
+            15
+          ]
+        ],
+        "pressure_materialization_event_type_quotas": "",
+        "pressure_disable_evidence_admission": true,
+        "pressure_algorithm_cooldown_s": 60,
+        "artifact_dir": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+        "db_url": "postgresql://<redacted>@127.0.0.1:5439/video_analytics",
+        "redis_url": "redis://127.0.0.1:6396/0",
+        "api_base": "http://127.0.0.1:8090/api/v1",
+        "compose_file": "infra/docker-compose.midterm.yml",
+        "env_file": "infra/env/midterm.env",
+        "evidence_root": "/data/video-analytics/media/evidence",
+        "replay_epoch_root": "/data/video-analytics/media/replay-sink-output/midterm/epochs",
+        "force_runtime_restart": false,
+        "no_quiesce_before_guard": false,
+        "rtsp_republish_output_base": "",
+        "rtsp_republish_input_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+        "rtsp_republish_mode": "copy",
+        "rtsp_republish_local_server": false,
+        "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+        "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+        "rtsp_republish_local_server_gateway": "",
+        "rtsp_republish_local_server_host_port": 18554,
+        "rtsp_republish_warmup_s": 10,
+        "rtsp_republish_readiness_timeout_s": 120,
+        "rtsp_republish_readiness_parallelism": 4,
+        "rtsp_republish_readiness_restart_attempts": 1,
+        "rtsp_republish_input_offset_s": 0,
+        "rtsp_republish_input_offset_step_s": 0,
+        "rtsp_republish_input_loop": false,
+        "rtsp_republish_h264_repeat_headers": false,
+        "max_send_failures": 0,
+        "max_exited_sources": 0,
+        "max_validate_seq_iq": 0,
+        "forwarder_null_sink": false,
+        "dual_shard_same_gpu": true,
+        "dual_shard_api": false,
+        "dual_shard_gpu": "0",
+        "dual_shard_source_mode": "balanced",
+        "evidence_shard_count": 4,
+        "rolling_cache_evidence": true,
+        "rolling_cache_enable_coverage_merge": false,
+        "cleanup": true,
+        "clear_existing_evidence": false,
+        "discard_pressure_results": false,
+        "rolling_cache_prefill_s": 15,
+        "rolling_cache_postfill_s": 0,
+        "rolling_cache_min_raw_fps": 0,
+        "pressure_source_visibility_timeout_s": 300,
+        "pressure_source_visibility_poll_s": 5,
+        "pressure_source_visibility_stable_samples": 2,
+        "pressure_source_visibility_restart_attempts": 1,
+        "pressure_source_ffmpeg_timeout_ms": 60000,
+        "pressure_source_ffmpeg_init_timeout_ms": 60000,
+        "pressure_source_start_stagger_s": 2,
+        "savant_ablation_stage": "full-evidence",
+        "savant_output_mode": "metadata-only",
+        "cpu_isolation_profile": "none",
+        "cuda_mps": false,
+        "mps_savant_active_thread_percentage": 0,
+        "mps_adaface_active_thread_percentage": 0,
+        "adaface_classifier_async": false,
+        "face_secondary_track_id": false,
+        "adaface_input_queue": false,
+        "adaface_crop_resize": false,
+        "adaface_pre_gate": false,
+        "adaface_decoupled": false,
+        "max_adaface_forwarder_send_failure_ratio": 0.005,
+        "adaface_decoupled_sharded": false,
+        "adaface_roi_redis": true,
+        "adaface_roi_batch_timeout_ms": 10,
+        "media_worker_materialization_max_active": 4,
+        "media_worker_rolling_remux_workers": 2,
+        "media_worker_segment_index_io_concurrency": 2,
+        "media_worker_db_index_io_concurrency": 0,
+        "media_worker_finalizer_workers": 4,
+        "media_worker_finalizer_process_workers": 4,
+        "media_worker_finalizer_queue_capacity": 4,
+        "media_worker_rolling_max_per_poll": 4,
+        "pressure_pause_redis_rdb": false,
+        "pressure_tune_postgres_checkpoints": false,
+        "pressure_rolling_cache_host_root": "",
+        "pressure_rolling_cache_materialized_host_root": "",
+        "pressure_rolling_cache_retention_s": 0,
+        "preserve_warmup_results": false,
+        "pressure_sampling_start_event_ts_ms": 1791840858418,
+        "pressure_sampling_end_event_ts_ms": 1791844489666,
+        "rolling_cache_publication_workers": 4,
+        "rolling_cache_publication_commit_slots": 0,
+        "rolling_cache_publication_final_parent_group_limit": 1,
+        "rolling_cache_publication_file_sync_mode": "fsync",
+        "rolling_cache_publication_metadata_layout": "split"
+      },
+      "retention": {
+        "parameter": 0,
+        "pressure": 4320,
+        "observed": {
+          "rolling-cache-sink-a": {
+            "ROLLING_CACHE_MAINTENANCE_STABILITY_AGE_SECONDS": "5",
+            "ROLLING_CACHE_PUBLICATION_WORKERS": "4",
+            "ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS": "30",
+            "ROLLING_CACHE_RETENTION_SECONDS": "4320",
+            "ROLLING_CACHE_MAINTENANCE_OWNER": "true"
+          },
+          "rolling-cache-sink-b": {
+            "ROLLING_CACHE_PUBLICATION_WORKERS": "4",
+            "ROLLING_CACHE_MAINTENANCE_OWNER": "false",
+            "ROLLING_CACHE_MAINTENANCE_STABILITY_AGE_SECONDS": "5",
+            "ROLLING_CACHE_RETENTION_SECONDS": "4320",
+            "ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS": "30"
+          }
+        }
+      },
+      "visibility": {
+        "root": "/data/video-analytics/media/rolling-cache",
+        "source_prefix": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_",
+        "segments_measured": 12015,
+        "metadata_files_scanned": 12015,
+        "metadata_visible_lag_s": {
+          "status": "measured",
+          "count": 12015,
+          "min": 0.261,
+          "p50": 1187.41,
+          "p95": 4195.728,
+          "p99": 4764.196,
+          "max": 4914.386
+        },
+        "snapshot_visible_at_buckets_first_utc": "2026-10-12T21:31:00+00:00",
+        "snapshot_visible_at_buckets_last_utc": "2026-10-12T23:13:30+00:00",
+        "host_override_env_record_missing": true,
+        "report_root_three_part_evidence_gate": "not satisfied: historical host override environment was not recorded",
+        "full_rate_gate_schema": [
+          {
+            "path": "rolling_cache_full_rate_gate",
+            "type": "dict",
+            "count": 10
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.expected_fps",
+            "value": 23.976023976023978
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.expected_fps_source",
+            "value": "rolling_cache_raw_input"
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.min_full_rate_fps",
+            "value": 21.57842157842158
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.configured_min_raw_fps",
+            "value": 0
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.min_full_rate_ratio",
+            "value": 0.9
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.observed_segment_frame_rate_p50",
+            "value": 24.297
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.segments_measured",
+            "value": 12015
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.source_count",
+            "value": 60
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.stream_count",
+            "value": 60
+          },
+          {
+            "path": "rolling_cache_full_rate_gate.full_rate_ok",
+            "value": true
+          }
+        ]
+      },
+      "db_summary_before_cleanup": {
+        "cameras": 60,
+        "events": 12023,
+        "suppressed_events": 7841,
+        "unsuppressed_events": 4182,
+        "tasks": 4182,
+        "bundles": 1316,
+        "playable_bundles": 1305,
+        "behavior_video_playable_bundles": 0,
+        "face_image_ready_bundles": 1305,
+        "watchlist_image_ready_bundles": 1305,
+        "covered_events": 0,
+        "covered_playable_events": 0,
+        "active_materialization_tasks": 0,
+        "ready_waiting_materialization_tasks": 0,
+        "unready_waiting_materialization_tasks": 0,
+        "distinct_events_with_playable_evidence": 1305,
+        "distinct_events_without_playable_evidence": 10718,
+        "covered_but_not_playable_distinct_events": 0,
+        "distinct_events_with_terminal_nonplayable_outcome": 10718,
+        "blocking_materialization_tasks": 0,
+        "expired_without_attempt_tasks": 1235,
+        "active_materialization_leases": 0,
+        "finalizer_pending_tasks": 0,
+        "finalizer_pending_unleased_tasks": 0,
+        "finalizer_pending_leased_tasks": 0,
+        "task_statuses": [
+          {
+            "status": "materialization_expired",
+            "materialization_status": "materialization_expired",
+            "count": 2876
+          },
+          {
+            "status": "materialized",
+            "materialization_status": "materialized",
+            "count": 1305
+          },
+          {
+            "status": "materialization_failed",
+            "materialization_status": "materialization_failed",
+            "count": 1
+          }
+        ],
+        "event_types": [
+          {
+            "event_type": "intrusion",
+            "count": 10338
+          },
+          {
+            "event_type": "watchlist_hit",
+            "count": 1685
+          }
+        ],
+        "adaface_roi": {
+          "observations": 50068,
+          "source_count": 60,
+          "embedding_norm_min": 0.9993724434493587,
+          "embedding_norm_max": 1.000645627406616
+        }
+      },
+      "cleanup_schema": [
+        {
+          "path": "pressure_runtime_cleanup_after_restore.disabled_cameras",
+          "value": 60
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_rules",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_zones",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_cameras",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_events",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_face_observations",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.deleted_person_bbox_observations",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_evidence_paths",
+          "value": 0
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.visual_results_retained",
+          "value": true
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.source_dirs",
+          "value": 127
+        },
+        {
+          "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.materialized_dirs",
+          "value": 0
+        }
+      ],
+      "publication_report_distributions": {
+        "rolling_cache_sink_a": {
+          "rolling_cache_publish_total_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 175.748,
+            "p50": 1241.71,
+            "p95": 6350.543,
+            "p99": 11103.788,
+            "max": 196758.079
+          },
+          "rolling_cache_publish_metadata_fsync_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 55.157,
+            "p50": 303.499,
+            "p95": 1367.434,
+            "p99": 1941.077,
+            "max": 187100.562
+          },
+          "rolling_cache_publish_manifest_fsync_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 74.66,
+            "p50": 334.206,
+            "p95": 1443.221,
+            "p99": 2110.989,
+            "max": 42062.322
+          },
+          "rolling_cache_publish_staging_dir_fsync_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 0.02,
+            "p50": 167.066,
+            "p95": 979.461,
+            "p99": 1578.238,
+            "max": 15166.626
+          },
+          "rolling_cache_publish_parent_dir_fsync_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 29.213,
+            "p50": 287.801,
+            "p95": 1392.214,
+            "p99": 2013.148,
+            "max": 24837.991
+          },
+          "rolling_cache_publication_capacity_wait_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 0.003,
+            "p50": 209.784,
+            "p95": 2600.083,
+            "p99": 5208.915,
+            "max": 191775.397
+          },
+          "rolling_cache_publication_queue_residence_ms": {
+            "status": "measured",
+            "count": 8861,
+            "min": 0.162,
+            "p50": 64493.205,
+            "p95": 331638.526,
+            "p99": 534936.118,
+            "max": 705607.198
+          }
+        },
+        "rolling_cache_sink_b": {
+          "rolling_cache_publish_total_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 167.534,
+            "p50": 2157.268,
+            "p95": 7387.365,
+            "p99": 12830.991,
+            "max": 82697.338
+          },
+          "rolling_cache_publish_metadata_fsync_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 53.388,
+            "p50": 483.106,
+            "p95": 1462.823,
+            "p99": 2315.813,
+            "max": 26777.948
+          },
+          "rolling_cache_publish_manifest_fsync_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 67.084,
+            "p50": 510.187,
+            "p95": 1595.597,
+            "p99": 2512.092,
+            "max": 69982.781
+          },
+          "rolling_cache_publish_staging_dir_fsync_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 0.025,
+            "p50": 319.88,
+            "p95": 1093.869,
+            "p99": 1602.682,
+            "max": 69409.932
+          },
+          "rolling_cache_publish_parent_dir_fsync_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 31.109,
+            "p50": 481.44,
+            "p95": 1468.08,
+            "p99": 2094.618,
+            "max": 26659.29
+          },
+          "rolling_cache_publication_capacity_wait_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 0.003,
+            "p50": 262.142,
+            "p95": 2868.094,
+            "p99": 5187.369,
+            "max": 73229.248
+          },
+          "rolling_cache_publication_queue_residence_ms": {
+            "status": "measured",
+            "count": 6210,
+            "min": 0.134,
+            "p50": 87224.386,
+            "p95": 333368.851,
+            "p99": 549348.832,
+            "max": 594511.005
+          }
+        }
+      },
+      "remux_report": {
+        "status": "measured",
+        "count": 6,
+        "min": 239,
+        "p50": 271,
+        "p95": 850.5,
+        "p99": 998.1,
+        "max": 1035
+      },
+      "sample_summary": {
+        "sample_count": 98,
+        "max_queue_depth": 16384,
+        "max_forwarder_queue_depth": 16384,
+        "max_forwarder_queue_depth_instantaneous": 16384,
+        "max_adaface_forwarder_queue_depth": 0,
+        "max_raw_forwarder_queue_depth": 16,
+        "steady_effective_fps_sample_count": 97,
+        "steady_effective_fps_method": "savant_frames_seen_counter_delta",
+        "steady_window_effective_fps_mean": 4.1032,
+        "steady_counter_effective_fps": 3.8769,
+        "steady_effective_fps_mean": 3.8769,
+        "minimum_effective_fps": 3.96,
+        "steady_effective_fps_meets_minimum": false,
+        "steady_effective_fps_target_ratio": 0.9692
+      },
+      "analysis_code_evidence": {
+        "count": 98,
+        "first": "runtime_000.json",
+        "metric_name_occurrences": {},
+        "metric_name_samples": [],
+        "shard_queue_max_initial_parse": {
+          "unknown": 8192
+        }
+      },
+      "non_materialized_details": {
+        "source_file": "non_materialized_task_details.json",
+        "sha256": "7af4ddbf382333cc45b4921864edb1dbd7e8be20626ad9f0b92a2c8146607ee8",
+        "count": 2877,
+        "key_counts": {
+          "task_id": 2877,
+          "event_id": 2877,
+          "source_event_id": 2877,
+          "source_id": 2877,
+          "event_type": 2877,
+          "event_ts_ms": 2877,
+          "pre_seconds": 2877,
+          "post_seconds": 2877,
+          "status": 2877,
+          "materialization_status": 2877,
+          "materialization_defer_reason": 2877,
+          "materialization_failure_reason": 2877,
+          "materialization_expired_reason": 2877,
+          "materialization_effective_reason": 2877,
+          "runtime_epoch_id": 2877,
+          "materialization_ready_at": 2877,
+          "materialization_deadline_at": 2877,
+          "materialization_attempt_count": 2877,
+          "task_created_at": 2877,
+          "task_updated_at": 2877,
+          "event_status": 2877,
+          "event_media_status": 2877,
+          "event_created_at": 2877,
+          "event_media": 2877,
+          "bundle_event_id": 2877,
+          "coverage_reason": 2877,
+          "coverage_metadata": 2877
+        },
+        "groups": [
+          {
+            "event_type": "intrusion",
+            "status": "materialization_expired",
+            "expired_reason": "business_deadline_expired",
+            "never_attempted": false,
+            "count": 1641
+          },
+          {
+            "event_type": "intrusion",
+            "status": "materialization_expired",
+            "expired_reason": "business_deadline_expired",
+            "never_attempted": true,
+            "count": 1225
+          },
+          {
+            "event_type": "watchlist_hit",
+            "status": "materialization_expired",
+            "expired_reason": "business_deadline_expired",
+            "never_attempted": true,
+            "count": 10
+          },
+          {
+            "event_type": "watchlist_hit",
+            "status": "materialization_failed",
+            "expired_reason": null,
+            "never_attempted": false,
+            "count": 1
+          }
+        ],
+        "last_reason_fields_present": [],
+        "attempts_distribution": {
+          "count": 2877,
+          "min": 0,
+          "p50": 14,
+          "p95": 28,
+          "max": 30
+        }
+      },
+      "stop_gate": "T0.3(5): normalized last retry reason and audit detail unavailable in allowed historical artifacts"
+    }
+  }
+}

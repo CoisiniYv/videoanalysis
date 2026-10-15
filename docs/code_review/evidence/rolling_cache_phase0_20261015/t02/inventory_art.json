@@ -1,0 +1,1317 @@
+{
+  "captured_at_utc": "2026-10-15T09:56:07.555810+00:00",
+  "roots": {
+    "1012": {
+      "path": "/data/video-analytics/artifacts/pressure60_remux_refill_t4_4fps_1h_20261011_r2",
+      "entries": [
+        {
+          "name": "active_evidence_before.json",
+          "bytes": 62,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:28.273845+00:00"
+        },
+        {
+          "name": "adaface_forwarder_logs_since_start.txt",
+          "bytes": 306,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:17.832767+00:00"
+        },
+        {
+          "name": "adaface_roi_worker_logs_since_start.txt",
+          "bytes": 639,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:17.812767+00:00"
+        },
+        {
+          "name": "analysis_forwarder_logs_since_start.txt",
+          "bytes": 432685,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:17.872766+00:00"
+        },
+        {
+          "name": "cameras.midterm.pressure.yml",
+          "bytes": 144353,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.713406+00:00"
+        },
+        {
+          "name": "cameras_before.json",
+          "bytes": 16114,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:28.203847+00:00"
+        },
+        {
+          "name": "clip_worker_logs_since_start.txt",
+          "bytes": 75194,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.202761+00:00"
+        },
+        {
+          "name": "compose.dual-shard-same-gpu.override.yml",
+          "bytes": 5006,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.823404+00:00"
+        },
+        {
+          "name": "compose_flush_rolling_cache_sinks_after_source_stop.json",
+          "bytes": 906,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:54.708054+00:00"
+        },
+        {
+          "name": "compose_flush_rolling_cache_sinks_after_source_stop.log",
+          "bytes": 180,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:54.668054+00:00"
+        },
+        {
+          "name": "compose_recreate_clip_worker_pressure_limits.json",
+          "bytes": 798,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:43.803512+00:00"
+        },
+        {
+          "name": "compose_recreate_clip_worker_pressure_limits.log",
+          "bytes": 228,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:43.793512+00:00"
+        },
+        {
+          "name": "compose_recreate_dual_shard_same_gpu.log",
+          "bytes": 1208,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:57.803211+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.json",
+          "bytes": 1874,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:33.363736+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:33.353736+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.override.yml",
+          "bytes": 915,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:29.703815+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.json",
+          "bytes": 10630,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:35.143698+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:35.123698+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.override.yml",
+          "bytes": 5200,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:33.373736+00:00"
+        },
+        {
+          "name": "compose_recreate_restore.log",
+          "bytes": 464,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:25:13.976309+00:00"
+        },
+        {
+          "name": "compose_recreate_rolling_cache_sinks.log",
+          "bytes": 528,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:44:05.353049+00:00"
+        },
+        {
+          "name": "compose_restore_clip_worker_replay_shards.json",
+          "bytes": 778,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:15.755283+00:00"
+        },
+        {
+          "name": "compose_restore_clip_worker_replay_shards.log",
+          "bytes": 228,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:15.735284+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.json",
+          "bytes": 1814,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:17.485255+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:17.465255+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.override.yml",
+          "bytes": 906,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:15.755283+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.json",
+          "bytes": 10524,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:19.475222+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:19.465222+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.override.yml",
+          "bytes": 5228,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:17.485255+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks.json",
+          "bytes": 3445,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:21.325191+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks.log",
+          "bytes": 71,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:19.475222+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks_running.log",
+          "bytes": 528,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:21.255192+00:00"
+        },
+        {
+          "name": "compose_restore_worker_cpu_isolation.log",
+          "bytes": 740,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:53.734653+00:00"
+        },
+        {
+          "name": "compose_stop_dual_shard_same_gpu.log",
+          "bytes": 599,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:24:52.276670+00:00"
+        },
+        {
+          "name": "compose_stop_legacy_replay_for_direct_rolling.log",
+          "bytes": 726,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:49.513389+00:00"
+        },
+        {
+          "name": "compose_stop_rolling_cache_sinks_before_reconfigure.log",
+          "bytes": 262,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:36.933659+00:00"
+        },
+        {
+          "name": "compose_stop_single_for_dual_pressure.log",
+          "bytes": 230,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:29.693815+00:00"
+        },
+        {
+          "name": "cpu_isolation_apply.json",
+          "bytes": 1023,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:28.193847+00:00"
+        },
+        {
+          "name": "cpu_isolation_drain.json",
+          "bytes": 862,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:50:20.060584+00:00"
+        },
+        {
+          "name": "cpu_isolation_reapply.json",
+          "bytes": 842,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:34.881182+00:00"
+        },
+        {
+          "name": "cpu_isolation_restore.json",
+          "bytes": 1001,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:53.774652+00:00"
+        },
+        {
+          "name": "cuda_mps_container.log",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:24:52.496666+00:00"
+        },
+        {
+          "name": "cuda_mps_control.log",
+          "bytes": 30611,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:24:52.426667+00:00"
+        },
+        {
+          "name": "cuda_mps_server.log",
+          "bytes": 4686,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:24:52.476666+00:00"
+        },
+        {
+          "name": "cuda_mps_start.json",
+          "bytes": 431,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.273416+00:00"
+        },
+        {
+          "name": "cuda_mps_start.log",
+          "bytes": 65,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.203417+00:00"
+        },
+        {
+          "name": "cuda_mps_stop.json",
+          "bytes": 619,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:25:09.166389+00:00"
+        },
+        {
+          "name": "db_summary_before_cleanup.json",
+          "bytes": 1369,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:10:49.770464+00:00"
+        },
+        {
+          "name": "downstream_observability_summary.json",
+          "bytes": 82329,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:23:44.717785+00:00"
+        },
+        {
+          "name": "drain_snapshots.json",
+          "bytes": 47679,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:06.792948+00:00"
+        },
+        {
+          "name": "dual_shard_metrics_ready.json",
+          "bytes": 2953,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:44:03.813082+00:00"
+        },
+        {
+          "name": "dual_shard_source_plan.json",
+          "bytes": 487,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.763405+00:00"
+        },
+        {
+          "name": "event_worker_logs_since_start.txt",
+          "bytes": 4356266,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.272760+00:00"
+        },
+        {
+          "name": "evidence_window_validation.json",
+          "bytes": 2442,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:10:49.860463+00:00"
+        },
+        {
+          "name": "face_worker_logs_since_start.txt",
+          "bytes": 21818070,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.562755+00:00"
+        },
+        {
+          "name": "kept_50_evidence.csv",
+          "bytes": 1489085,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:11.112877+00:00"
+        },
+        {
+          "name": "legacy_replay_direct_rolling_stop.json",
+          "bytes": 8728,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:49.803383+00:00"
+        },
+        {
+          "name": "media_worker_logs_since_start.txt",
+          "bytes": 59704033,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.142762+00:00"
+        },
+        {
+          "name": "module.pressure.yml",
+          "bytes": 9971,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.813404+00:00"
+        },
+        {
+          "name": "non_materialized_task_details.json",
+          "bytes": 3,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:10:49.830463+00:00"
+        },
+        {
+          "name": "operator_dual_runtime_precreate_after_pressure.json",
+          "bytes": 206,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:58.854568+00:00"
+        },
+        {
+          "name": "performance_apply_pressure.json",
+          "bytes": 384,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:29.693815+00:00"
+        },
+        {
+          "name": "performance_before.json",
+          "bytes": 915,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:28.203847+00:00"
+        },
+        {
+          "name": "person_trajectory_completeness.json",
+          "bytes": 696,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:10:48.770480+00:00"
+        },
+        {
+          "name": "person_worker_logs_since_start.txt",
+          "bytes": 10734,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.282759+00:00"
+        },
+        {
+          "name": "pressure_diagnostics.json",
+          "bytes": 1948807,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:10:39.990624+00:00"
+        },
+        {
+          "name": "pressure_event_quiescence_snapshots.json",
+          "bytes": 9571,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:32.908410+00:00"
+        },
+        {
+          "name": "pressure_event_quiescence_summary.json",
+          "bytes": 2513,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:32.908410+00:00"
+        },
+        {
+          "name": "pressure_post_sample_cleanup.json",
+          "bytes": 1447,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:55.158046+00:00"
+        },
+        {
+          "name": "pressure_sampling_cutoff.json",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:46:32.164095+00:00"
+        },
+        {
+          "name": "pressure_sampling_settle_snapshots.json",
+          "bytes": 23918,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:46:20.500273+00:00"
+        },
+        {
+          "name": "pressure_sampling_settle_summary.json",
+          "bytes": 8204,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:46:20.500273+00:00"
+        },
+        {
+          "name": "pressure_sampling_window.json",
+          "bytes": 175,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:46:32.044097+00:00"
+        },
+        {
+          "name": "pressure_source_isolation.json",
+          "bytes": 194,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:45.210976+00:00"
+        },
+        {
+          "name": "pressure_source_visibility_ready.json",
+          "bytes": 8181,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:45.170977+00:00"
+        },
+        {
+          "name": "pressure_source_visibility_snapshots.json",
+          "bytes": 23704,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:45.170977+00:00"
+        },
+        {
+          "name": "replay_raw_fanout_logs_since_start.txt",
+          "bytes": 432685,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:17.912766+00:00"
+        },
+        {
+          "name": "replay_shards.evidence-4.pressure.json",
+          "bytes": 5219,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.763405+00:00"
+        },
+        {
+          "name": "replay_topology_summary.json",
+          "bytes": 4692,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:23:44.707785+00:00"
+        },
+        {
+          "name": "report.json",
+          "bytes": 85101648,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:58.774569+00:00"
+        },
+        {
+          "name": "rolling_cache_ingress_audit.json",
+          "bytes": 4567,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:44:05.823039+00:00"
+        },
+        {
+          "name": "rolling_cache_postfill_summary.json",
+          "bytes": 1942,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:49:27.321422+00:00"
+        },
+        {
+          "name": "rolling_cache_prefill_summary.json",
+          "bytes": 9538,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:46:20.750268+00:00"
+        },
+        {
+          "name": "rolling_cache_segment_visibility.json",
+          "bytes": 72458,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:49:02.321804+00:00"
+        },
+        {
+          "name": "rolling_cache_sink_a_logs_since_start.txt",
+          "bytes": 59517398,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:18.782751+00:00"
+        },
+        {
+          "name": "rolling_cache_sink_b_logs_since_start.txt",
+          "bytes": 59437905,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.022747+00:00"
+        },
+        {
+          "name": "rolling_cache_sinks_pressure.json",
+          "bytes": 4721,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:44:05.433048+00:00"
+        },
+        {
+          "name": "rolling_cache_sinks_stopped_before_reconfigure.json",
+          "bytes": 579,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:36.953659+00:00"
+        },
+        {
+          "name": "run_config.json",
+          "bytes": 4753,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:46:32.054096+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_after_pressure_runtime_cleanup.json",
+          "bytes": 54435,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:26:22.525171+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_quiesce_before_guard.json",
+          "bytes": 81799,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:29.353822+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_stop_pressure.json",
+          "bytes": 90796,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:50:19.830588+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_stop_pressure_sources.json",
+          "bytes": 54739,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:50:15.710655+00:00"
+        },
+        {
+          "name": "sample_summary.json",
+          "bytes": 1272963,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:52:56.458025+00:00"
+        },
+        {
+          "name": "samples",
+          "bytes": 24576,
+          "is_file": false,
+          "modified_utc": "2026-10-11T15:46:32.024097+00:00"
+        },
+        {
+          "name": "savant_ablation_manifest.json",
+          "bytes": 807,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.813404+00:00"
+        },
+        {
+          "name": "savant_logs_since_start.txt",
+          "bytes": 327761197,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:17.512772+00:00"
+        },
+        {
+          "name": "source_adapter_logs",
+          "bytes": 4096,
+          "is_file": false,
+          "modified_utc": "2026-10-11T15:49:34.141318+00:00"
+        },
+        {
+          "name": "source_adapter_logs.json",
+          "bytes": 8672,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:49:34.141318+00:00"
+        },
+        {
+          "name": "source_containers_before_stop.json",
+          "bytes": 22650,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:49:32.251347+00:00"
+        },
+        {
+          "name": "source_controller_start_dual_shard.json",
+          "bytes": 67503,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:34.591188+00:00"
+        },
+        {
+          "name": "source_controller_start_dual_shard.log",
+          "bytes": 87900,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:45:34.591188+00:00"
+        },
+        {
+          "name": "sources.dual-shard.generated.yml",
+          "bytes": 26049,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:48.763405+00:00"
+        },
+        {
+          "name": "topology_before.json",
+          "bytes": 1106,
+          "is_file": true,
+          "modified_utc": "2026-10-11T14:43:28.203847+00:00"
+        },
+        {
+          "name": "video_file_sink_a_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.082747+00:00"
+        },
+        {
+          "name": "video_file_sink_b_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.092746+00:00"
+        },
+        {
+          "name": "video_file_sink_c_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.102746+00:00"
+        },
+        {
+          "name": "video_file_sink_d_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.122746+00:00"
+        },
+        {
+          "name": "video_file_sink_e_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.132746+00:00"
+        },
+        {
+          "name": "video_file_sink_f_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.142745+00:00"
+        },
+        {
+          "name": "video_file_sink_g_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.152745+00:00"
+        },
+        {
+          "name": "video_file_sink_h_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.172745+00:00"
+        },
+        {
+          "name": "video_file_sink_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-11T15:58:19.062747+00:00"
+        },
+        {
+          "name": "video_file_sink_pressure_summary.json",
+          "bytes": 6106,
+          "is_file": true,
+          "modified_utc": "2026-10-11T16:23:44.707785+00:00"
+        }
+      ]
+    },
+    "1013": {
+      "path": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+      "entries": [
+        {
+          "name": "active_evidence_before.json",
+          "bytes": 62,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:26.725610+00:00"
+        },
+        {
+          "name": "active_evidence_guard_snapshots.json",
+          "bytes": 131,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:27.755592+00:00"
+        },
+        {
+          "name": "adaface_forwarder_logs_since_start.txt",
+          "bytes": 306,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:24.237982+00:00"
+        },
+        {
+          "name": "adaface_roi_worker_logs_since_start.txt",
+          "bytes": 353,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:24.207982+00:00"
+        },
+        {
+          "name": "analysis_forwarder_logs_since_start.txt",
+          "bytes": 925898,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:24.287981+00:00"
+        },
+        {
+          "name": "cameras.midterm.pressure.yml",
+          "bytes": 145333,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.895292+00:00"
+        },
+        {
+          "name": "cameras_before.json",
+          "bytes": 17314,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:26.655612+00:00"
+        },
+        {
+          "name": "clip_worker_logs_since_start.txt",
+          "bytes": 118138,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:25.567957+00:00"
+        },
+        {
+          "name": "compose.dual-shard-same-gpu.override.yml",
+          "bytes": 3998,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:45.115288+00:00"
+        },
+        {
+          "name": "compose_flush_rolling_cache_sinks_after_source_stop.json",
+          "bytes": 906,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:06.348386+00:00"
+        },
+        {
+          "name": "compose_flush_rolling_cache_sinks_after_source_stop.log",
+          "bytes": 180,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:06.298386+00:00"
+        },
+        {
+          "name": "compose_recreate_clip_worker_pressure_limits.json",
+          "bytes": 798,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.485299+00:00"
+        },
+        {
+          "name": "compose_recreate_clip_worker_pressure_limits.log",
+          "bytes": 228,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.465299+00:00"
+        },
+        {
+          "name": "compose_recreate_dual_shard_same_gpu.log",
+          "bytes": 1208,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:54.115130+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.json",
+          "bytes": 1946,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:33.845485+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:33.825486+00:00"
+        },
+        {
+          "name": "compose_recreate_event_worker_rolling_cache.override.yml",
+          "bytes": 970,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:30.515544+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.json",
+          "bytes": 12791,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:36.265443+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:36.245443+00:00"
+        },
+        {
+          "name": "compose_recreate_media_worker_rolling_cache.override.yml",
+          "bytes": 6338,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:33.855485+00:00"
+        },
+        {
+          "name": "compose_recreate_restore.log",
+          "bytes": 464,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:06:11.168302+00:00"
+        },
+        {
+          "name": "compose_recreate_rolling_cache_sinks.log",
+          "bytes": 528,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:31:00.845012+00:00"
+        },
+        {
+          "name": "compose_restore_clip_worker_replay_shards.json",
+          "bytes": 798,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:06:59.987445+00:00"
+        },
+        {
+          "name": "compose_restore_clip_worker_replay_shards.log",
+          "bytes": 228,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:06:59.967446+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.json",
+          "bytes": 1914,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:01.757414+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:01.737415+00:00"
+        },
+        {
+          "name": "compose_restore_event_worker_evidence_admission.override.yml",
+          "bytes": 954,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:06:59.987445+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.json",
+          "bytes": 11040,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:03.557383+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.log",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:03.537383+00:00"
+        },
+        {
+          "name": "compose_restore_media_worker_rolling_cache.override.yml",
+          "bytes": 5486,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:01.767414+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks.json",
+          "bytes": 3570,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:05.137355+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks.log",
+          "bytes": 71,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:03.557383+00:00"
+        },
+        {
+          "name": "compose_restore_rolling_cache_sinks_running.log",
+          "bytes": 528,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:05.067356+00:00"
+        },
+        {
+          "name": "compose_stop_dual_shard_same_gpu.log",
+          "bytes": 599,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:06:06.298387+00:00"
+        },
+        {
+          "name": "compose_stop_legacy_replay_for_direct_rolling.log",
+          "bytes": 726,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:45.835275+00:00"
+        },
+        {
+          "name": "compose_stop_rolling_cache_sinks_before_reconfigure.log",
+          "bytes": 262,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:38.305407+00:00"
+        },
+        {
+          "name": "compose_stop_single_for_dual_pressure.log",
+          "bytes": 230,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:30.515544+00:00"
+        },
+        {
+          "name": "db_summary_before_cleanup.json",
+          "bytes": 1635,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:54:41.730494+00:00"
+        },
+        {
+          "name": "downstream_observability_summary.json",
+          "bytes": 69149,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:55:57.469017+00:00"
+        },
+        {
+          "name": "drain_snapshots.json",
+          "bytes": 107253,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:14.178168+00:00"
+        },
+        {
+          "name": "dual_shard_metrics_ready.json",
+          "bytes": 2451,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:58.135060+00:00"
+        },
+        {
+          "name": "dual_shard_source_plan.json",
+          "bytes": 521,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.995290+00:00"
+        },
+        {
+          "name": "event_worker_logs_since_start.txt",
+          "bytes": 5314328,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:25.657956+00:00"
+        },
+        {
+          "name": "evidence_window_validation.json",
+          "bytes": 671,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:54:42.280483+00:00"
+        },
+        {
+          "name": "face_worker_logs_since_start.txt",
+          "bytes": 33723682,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.267944+00:00"
+        },
+        {
+          "name": "kept_50_evidence.csv",
+          "bytes": 367090,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:15.288147+00:00"
+        },
+        {
+          "name": "legacy_replay_direct_rolling_stop.json",
+          "bytes": 8728,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:46.125270+00:00"
+        },
+        {
+          "name": "media_worker_logs_since_start.txt",
+          "bytes": 183482765,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:25.437960+00:00"
+        },
+        {
+          "name": "module.pressure.yml",
+          "bytes": 9971,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:45.105288+00:00"
+        },
+        {
+          "name": "non_materialized_task_details.json",
+          "bytes": 7791050,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:54:42.280483+00:00"
+        },
+        {
+          "name": "operator_dual_runtime_precreate_after_pressure.json",
+          "bytes": 233,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:27.506962+00:00"
+        },
+        {
+          "name": "performance_apply_pressure.json",
+          "bytes": 384,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:30.515544+00:00"
+        },
+        {
+          "name": "performance_before.json",
+          "bytes": 915,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:26.655612+00:00"
+        },
+        {
+          "name": "person_trajectory_completeness.json",
+          "bytes": 691,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:54:40.760513+00:00"
+        },
+        {
+          "name": "person_worker_logs_since_start.txt",
+          "bytes": 20036,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:25.677955+00:00"
+        },
+        {
+          "name": "pressure_diagnostics.json",
+          "bytes": 1907488,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:54:29.240737+00:00"
+        },
+        {
+          "name": "pressure_event_quiescence_snapshots.json",
+          "bytes": 4789,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:04.258418+00:00"
+        },
+        {
+          "name": "pressure_event_quiescence_summary.json",
+          "bytes": 2514,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:04.268418+00:00"
+        },
+        {
+          "name": "pressure_post_sample_cleanup.json",
+          "bytes": 1447,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:06.758379+00:00"
+        },
+        {
+          "name": "pressure_sampling_cutoff.json",
+          "bytes": 232,
+          "is_file": true,
+          "modified_utc": "2026-10-12T22:34:52.218807+00:00"
+        },
+        {
+          "name": "pressure_sampling_settle_snapshots.json",
+          "bytes": 30038,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:34:17.351566+00:00"
+        },
+        {
+          "name": "pressure_sampling_settle_summary.json",
+          "bytes": 10244,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:34:17.351566+00:00"
+        },
+        {
+          "name": "pressure_sampling_window.json",
+          "bytes": 174,
+          "is_file": true,
+          "modified_utc": "2026-10-12T22:34:50.518817+00:00"
+        },
+        {
+          "name": "pressure_source_visibility_ready.json",
+          "bytes": 10222,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:33:52.102009+00:00"
+        },
+        {
+          "name": "pressure_source_visibility_snapshots.json",
+          "bytes": 29827,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:33:52.102009+00:00"
+        },
+        {
+          "name": "replay_raw_fanout_logs_since_start.txt",
+          "bytes": 925898,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:24.337980+00:00"
+        },
+        {
+          "name": "replay_shards.evidence-4.pressure.json",
+          "bytes": 6256,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.995290+00:00"
+        },
+        {
+          "name": "replay_topology_summary.json",
+          "bytes": 4692,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:55:57.459017+00:00"
+        },
+        {
+          "name": "report.json",
+          "bytes": 19778050,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:27.486963+00:00"
+        },
+        {
+          "name": "rolling_cache_ingress_audit.json",
+          "bytes": 4567,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:31:01.475001+00:00"
+        },
+        {
+          "name": "rolling_cache_postfill_summary.json",
+          "bytes": 1926,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:17:51.660494+00:00"
+        },
+        {
+          "name": "rolling_cache_prefill_summary.json",
+          "bytes": 11543,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:34:18.411548+00:00"
+        },
+        {
+          "name": "rolling_cache_segment_visibility.json",
+          "bytes": 121035,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:17:46.630573+00:00"
+        },
+        {
+          "name": "rolling_cache_sink_a_logs_since_start.txt",
+          "bytes": 14466804,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.407942+00:00"
+        },
+        {
+          "name": "rolling_cache_sink_b_logs_since_start.txt",
+          "bytes": 10432594,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.557939+00:00"
+        },
+        {
+          "name": "rolling_cache_sinks_pressure.json",
+          "bytes": 4980,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:31:00.985009+00:00"
+        },
+        {
+          "name": "rolling_cache_sinks_stopped_before_reconfigure.json",
+          "bytes": 579,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:38.325407+00:00"
+        },
+        {
+          "name": "run_config.json",
+          "bytes": 4736,
+          "is_file": true,
+          "modified_utc": "2026-10-12T22:34:50.628817+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_after_pressure_runtime_cleanup.json",
+          "bytes": 57495,
+          "is_file": true,
+          "modified_utc": "2026-10-13T00:07:06.147337+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_quiesce_before_guard.json",
+          "bytes": 56955,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:27.625594+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_stop_pressure.json",
+          "bytes": 106368,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:18:01.680337+00:00"
+        },
+        {
+          "name": "runtime_sources_apply_stop_pressure_sources.json",
+          "bytes": 57739,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:17:57.540402+00:00"
+        },
+        {
+          "name": "sample_summary.json",
+          "bytes": 1251440,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:20:08.408353+00:00"
+        },
+        {
+          "name": "samples",
+          "bytes": 20480,
+          "is_file": false,
+          "modified_utc": "2026-10-12T22:34:49.648823+00:00"
+        },
+        {
+          "name": "savant_ablation_manifest.json",
+          "bytes": 801,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:45.105288+00:00"
+        },
+        {
+          "name": "savant_logs_since_start.txt",
+          "bytes": 399179184,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:23.717991+00:00"
+        },
+        {
+          "name": "source_adapter_logs",
+          "bytes": 12288,
+          "is_file": false,
+          "modified_utc": "2026-10-12T23:17:55.440435+00:00"
+        },
+        {
+          "name": "source_adapter_logs.json",
+          "bytes": 10049,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:17:55.440435+00:00"
+        },
+        {
+          "name": "source_containers_before_stop.json",
+          "bytes": 33403,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:17:54.480450+00:00"
+        },
+        {
+          "name": "source_controller_start_dual_shard.json",
+          "bytes": 68523,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:33:41.782190+00:00"
+        },
+        {
+          "name": "source_controller_start_dual_shard.log",
+          "bytes": 90960,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:33:41.782190+00:00"
+        },
+        {
+          "name": "sources.dual-shard.generated.yml",
+          "bytes": 27009,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:44.985290+00:00"
+        },
+        {
+          "name": "topology_before.json",
+          "bytes": 1106,
+          "is_file": true,
+          "modified_utc": "2026-10-12T21:30:26.655612+00:00"
+        },
+        {
+          "name": "video_file_sink_a_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.587938+00:00"
+        },
+        {
+          "name": "video_file_sink_b_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.597938+00:00"
+        },
+        {
+          "name": "video_file_sink_c_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.617938+00:00"
+        },
+        {
+          "name": "video_file_sink_d_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.627938+00:00"
+        },
+        {
+          "name": "video_file_sink_e_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.637938+00:00"
+        },
+        {
+          "name": "video_file_sink_f_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.647937+00:00"
+        },
+        {
+          "name": "video_file_sink_g_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.657937+00:00"
+        },
+        {
+          "name": "video_file_sink_h_logs_since_start.txt",
+          "bytes": 89,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.677937+00:00"
+        },
+        {
+          "name": "video_file_sink_logs_since_start.txt",
+          "bytes": 0,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:30:26.577939+00:00"
+        },
+        {
+          "name": "video_file_sink_pressure_summary.json",
+          "bytes": 6259,
+          "is_file": true,
+          "modified_utc": "2026-10-12T23:55:57.459017+00:00"
+        }
+      ]
+    }
+  }
+}

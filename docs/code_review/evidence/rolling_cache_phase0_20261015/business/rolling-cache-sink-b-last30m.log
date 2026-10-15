@@ -1,0 +1,5 @@
+2026-10-15T09:44:54.245129863Z [rolling-cache-maintenance] requested_owner=false root=/media/rolling-cache
+2026-10-15T09:44:54.245246104Z [rolling-cache-sink] implementation=long-lived-splitmux root=/media/rolling-cache namespace=midterm segment_s=4 http_port=8080
+2026-10-15T09:44:54.423072628Z 2026-10-15 09:44:54,422 INFO rolling_cache_sink.gst publication dispatcher started workers=1 outstanding_limit=128 prepare_group_limit=1 commit_arbitration_enabled=False
+2026-10-15T09:44:54.463695382Z 2026-10-15 09:44:54,463 INFO rolling_cache_sink rolling-cache sink starting endpoint=sub+connect:tcp://replay-raw-fanout-b:5560 root=/media/rolling-cache namespace=midterm epoch=midterm-20261013T000620Z-a3ec4a32 segment_s=4.000 http=0.0.0.0:8080
+2026-10-15T09:44:54.463736723Z  2026-10-15T09:44:54.463Z INFO  insight::savant::savant_rs::py::utils::zeromq > Starting ZMQ source.

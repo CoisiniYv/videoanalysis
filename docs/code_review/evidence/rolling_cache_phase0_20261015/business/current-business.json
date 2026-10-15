@@ -1,0 +1,731 @@
+{
+  "evidence_status": "confirmed read-only query outputs; missing percentiles are unavailable, not zero",
+  "captured_at_utc": "2026-10-15T10:00:22.376Z",
+  "started_at_utc": "2026-10-15T10:00:19.928700+00:00",
+  "completed_at_utc": "2026-10-15T10:00:22.339382+00:00",
+  "window_24h_start_utc": "2026-10-14T10:00:19.928700+00:00",
+  "window_30m_start_utc": "2026-10-15T09:30:19.928700+00:00",
+  "population_rule": "cameras.source_id does not match case-insensitive ^pressure AND cameras.name does not match (压力|压测); evidence_tasks JOIN cameras ON cameras.id=evidence_tasks.camera_id; task window uses evidence_tasks.created_at",
+  "queries": {
+    "db_clock": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT now() AS database_now_utc,current_setting('TimeZone') AS session_timezone,current_setting('transaction_read_only') AS transaction_read_only) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": [
+        {
+          "database_now_utc": "2026-10-15T10:00:20.01724+00:00",
+          "session_timezone": "UTC",
+          "transaction_read_only": "on"
+        }
+      ]
+    },
+    "cameras": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT id,source_id,name,enabled,CASE WHEN COALESCE(source_id,'') ~* '^pressure' OR COALESCE(name,'') ~ '(压力|压测)' THEN 'pressure' ELSE 'nonpressure' END AS population FROM cameras ORDER BY population,enabled DESC,source_id) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": [
+        {
+          "id": "cam_1080movie",
+          "source_id": "source_cam_1080movie",
+          "name": "1080movie测试",
+          "enabled": false,
+          "population": "nonpressure"
+        },
+        {
+          "id": "1cf2cdc3-5e90-434a-af51-a5957ad57694",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_00",
+          "name": "压力摄像头 01",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "f5e03ce4-efdd-4f8d-a370-c32c13a699fc",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_01",
+          "name": "压力摄像头 02",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "9082f8d7-1438-4a8c-b433-596ee5883724",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_02",
+          "name": "压力摄像头 03",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "529e5356-b238-43f0-9ebb-6ea0eff01cba",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_03",
+          "name": "压力摄像头 04",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "0e650430-baed-462f-8cd4-c9faf1a53964",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_04",
+          "name": "压力摄像头 05",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "24ed764e-531b-4d01-b303-6d1e103c14b8",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_05",
+          "name": "压力摄像头 06",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "062c197b-73fd-4582-a47f-15eaa9b8581e",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_06",
+          "name": "压力摄像头 07",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "36b5d9bb-3ce1-435e-a555-e46ec0c72af8",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_07",
+          "name": "压力摄像头 08",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "8c478627-ed59-40b1-935d-a3c48ba0e8bd",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_08",
+          "name": "压力摄像头 09",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "749ffa4d-2a67-44af-9cfa-68293757d050",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_09",
+          "name": "压力摄像头 10",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "bde30986-ab1e-4016-928c-0f267e1eeb09",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_10",
+          "name": "压力摄像头 11",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "6452103f-b65d-45e0-bc4e-472e6e2edef2",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_11",
+          "name": "压力摄像头 12",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "cbe64543-48d9-4e26-9592-949ed34e53bb",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_12",
+          "name": "压力摄像头 13",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "72edb215-7137-4fd3-977f-e539beae2423",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_13",
+          "name": "压力摄像头 14",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "e811075e-ea97-4ce2-9528-115c641b0ce2",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_14",
+          "name": "压力摄像头 15",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "c97160ae-a0a2-45a7-92b4-db6c44c55d9b",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_15",
+          "name": "压力摄像头 16",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "616debec-f6b0-475c-b858-bf2ed58cad04",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_16",
+          "name": "压力摄像头 17",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "cdb26059-d2db-4d27-becb-7f97a02a5e5f",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_17",
+          "name": "压力摄像头 18",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "b3ce844d-35dd-4750-b69a-2312d89439b3",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_18",
+          "name": "压力摄像头 19",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "604e9ee3-f10a-4e74-8d04-1ec3dbaa7512",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_19",
+          "name": "压力摄像头 20",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "15b9c50b-3082-434f-967e-06c9bd040f34",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_20",
+          "name": "压力摄像头 21",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "5347ad9b-123f-41a6-aeda-b55214f2996f",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_21",
+          "name": "压力摄像头 22",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "d5fcd6ec-7376-48fa-922f-9e338c1c2901",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_22",
+          "name": "压力摄像头 23",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "1367e392-5b8f-41fb-bde4-7623d1074584",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_23",
+          "name": "压力摄像头 24",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "c238dc1b-e09d-424c-8c77-6f54346feb67",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_24",
+          "name": "压力摄像头 25",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "0c80ff65-7eb3-464a-a22b-3ee1c38e0146",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_25",
+          "name": "压力摄像头 26",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "dec87f54-f7f7-43b9-84b2-03a007b62d6b",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_26",
+          "name": "压力摄像头 27",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "f6c33c55-3585-4647-b47d-a2fa706526fe",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_27",
+          "name": "压力摄像头 28",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "1a0a2f6b-f65f-48ae-a98a-972c17fa4407",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_28",
+          "name": "压力摄像头 29",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "477ed3de-7390-452c-9c6e-5b149ff31913",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_29",
+          "name": "压力摄像头 30",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "85a7f92f-86dc-4ad1-8e20-3c94549335c1",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_30",
+          "name": "压力摄像头 31",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "64249b14-235e-47bb-8c70-6d0a53f92d8b",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_31",
+          "name": "压力摄像头 32",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "91ecab13-329f-4a31-a19d-e30d82223063",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_32",
+          "name": "压力摄像头 33",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "01e398c9-cc1c-4401-a2ed-777616d05594",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_33",
+          "name": "压力摄像头 34",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "acbdd36a-69fb-40d1-8a78-df0ec433f024",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_34",
+          "name": "压力摄像头 35",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "244bbeed-597a-4fc9-b8a8-3e0b0d1c8216",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_35",
+          "name": "压力摄像头 36",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "ccd16f7c-11e5-4f88-ab44-b0e4199bbc16",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_36",
+          "name": "压力摄像头 37",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "9d375b34-18ac-493d-854e-77589f8ee89f",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_37",
+          "name": "压力摄像头 38",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "4f72adb6-e31b-47e4-b176-d0ee36bd36cf",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_38",
+          "name": "压力摄像头 39",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "286dd5d4-b4f1-4207-92bb-a0ca8ded33ba",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_39",
+          "name": "压力摄像头 40",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "0a1d33e9-8b60-4572-a95f-95ac66d3e1df",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_40",
+          "name": "压力摄像头 41",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "483674bd-d65d-46dd-9fa8-01565ad79532",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_41",
+          "name": "压力摄像头 42",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "654ab9fb-9716-4524-a0e7-3553317f88ff",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_42",
+          "name": "压力摄像头 43",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "cf63e6f4-0311-4b75-ae7e-a34562e7016b",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_43",
+          "name": "压力摄像头 44",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "db631720-ca6e-47d6-9d2a-32c1442b9587",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_44",
+          "name": "压力摄像头 45",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "8d26b382-a604-41cf-8ffb-aae6e83659d6",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_45",
+          "name": "压力摄像头 46",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "dd68d56d-9229-4f3c-91cc-0444e7a663f4",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_46",
+          "name": "压力摄像头 47",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "7faaf0d0-7838-4f37-b9b0-c11a0f8d1368",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_47",
+          "name": "压力摄像头 48",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "d6393411-d41b-4fe7-a671-694014a8ea8d",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_48",
+          "name": "压力摄像头 49",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "6f67496b-02e5-4db3-91b5-4a55e3492874",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_49",
+          "name": "压力摄像头 50",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "11a70b34-7aa4-4597-8fd1-17c05b2cdfcc",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_50",
+          "name": "压力摄像头 51",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "b19100dd-ad1f-4b5c-bec2-784022f6c5b0",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_51",
+          "name": "压力摄像头 52",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "bbfea0dc-6c87-45d6-b9c9-03734f7d818a",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_52",
+          "name": "压力摄像头 53",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "37f4a536-8b85-47a7-9c6a-ad1c73d8e843",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_53",
+          "name": "压力摄像头 54",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "2b08c0ef-1738-4070-bc41-a8c67bb92429",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_54",
+          "name": "压力摄像头 55",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "3a333253-7f21-416a-a0c5-b3eff048afeb",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_55",
+          "name": "压力摄像头 56",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "67d86590-17f3-4fc5-9292-1f8108094da8",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_56",
+          "name": "压力摄像头 57",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "db5b7b6e-a5ad-4523-8a13-b8b17a9eddc7",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_57",
+          "name": "压力摄像头 58",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "4dd6b517-2dfb-412c-9e2e-b965722f5d18",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_58",
+          "name": "压力摄像头 59",
+          "enabled": false,
+          "population": "pressure"
+        },
+        {
+          "id": "c5c2f832-8ebb-417a-9d27-6513de534ec2",
+          "source_id": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_59",
+          "name": "压力摄像头 60",
+          "enabled": false,
+          "population": "pressure"
+        }
+      ]
+    },
+    "camera_counts": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT count(*) AS all_cameras,count(*) FILTER (WHERE enabled) AS all_enabled,count(*) FILTER (WHERE COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)') AS nonpressure_cameras,count(*) FILTER (WHERE enabled AND COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)') AS enabled_nonpressure_cameras FROM cameras c) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": [
+        {
+          "all_cameras": 61,
+          "all_enabled": 0,
+          "nonpressure_cameras": 1,
+          "enabled_nonpressure_cameras": 0
+        }
+      ]
+    },
+    "current_evidence_counts": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT et.task_type,et.materialization_status,count(*) AS task_count,count(*) FILTER (WHERE et.source_id IS DISTINCT FROM c.source_id) AS source_id_mismatch FROM evidence_tasks et JOIN cameras c ON c.id=et.camera_id WHERE et.created_at >= TIMESTAMPTZ '2026-10-14T10:00:19.928700+00:00' AND et.created_at < TIMESTAMPTZ '2026-10-15T10:00:19.928700+00:00' AND COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)' GROUP BY 1,2 ORDER BY 1,2) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": []
+    },
+    "current_evidence_population": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT count(*) AS all_tasks_24h,count(*) FILTER (WHERE c.id IS NULL) AS orphan_camera_tasks,count(*) FILTER (WHERE c.id IS NOT NULL AND COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)') AS joined_nonpressure_tasks,count(*) FILTER (WHERE c.id IS NOT NULL AND NOT (COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)')) AS joined_pressure_tasks FROM evidence_tasks et LEFT JOIN cameras c ON c.id=et.camera_id WHERE et.created_at >= TIMESTAMPTZ '2026-10-14T10:00:19.928700+00:00' AND et.created_at < TIMESTAMPTZ '2026-10-15T10:00:19.928700+00:00') q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": [
+        {
+          "all_tasks_24h": 0,
+          "orphan_camera_tasks": 0,
+          "joined_nonpressure_tasks": 0,
+          "joined_pressure_tasks": 0
+        }
+      ]
+    },
+    "current_latest_expired": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT et.task_id,et.camera_id,et.source_id,et.task_type,et.created_at,et.updated_at,et.materialization_deadline_at,et.materialization_phase_updated_at,et.materialization_audit,e.payload->'media'->>'materialization_expired_at' AS event_media_materialization_expired_at,e.payload->'media'->>'evidence_state_updated_at' AS event_media_evidence_state_updated_at FROM evidence_tasks et JOIN cameras c ON c.id=et.camera_id LEFT JOIN events e ON e.id=et.event_id WHERE et.created_at >= TIMESTAMPTZ '2026-10-14T10:00:19.928700+00:00' AND et.created_at < TIMESTAMPTZ '2026-10-15T10:00:19.928700+00:00' AND COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)' AND et.materialization_status='materialization_expired' ORDER BY et.updated_at DESC LIMIT 10) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": []
+    },
+    "alltime_latest_nonpressure_expired": {
+      "command": [
+        "docker",
+        "exec",
+        "video-analytics-midterm-postgres",
+        "psql",
+        "-X",
+        "-qAt",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "<from container POSTGRES_USER>",
+        "-d",
+        "<from container POSTGRES_DB>",
+        "-c",
+        "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL timezone='UTC'; SELECT row_to_json(q) FROM (SELECT et.task_id,et.camera_id,et.source_id,et.task_type,et.created_at,et.updated_at,et.materialization_deadline_at,et.materialization_phase_updated_at,e.payload->'media'->>'materialization_expired_at' AS event_media_materialization_expired_at,e.payload->'media'->>'evidence_state_updated_at' AS event_media_evidence_state_updated_at FROM evidence_tasks et JOIN cameras c ON c.id=et.camera_id LEFT JOIN events e ON e.id=et.event_id WHERE COALESCE(c.source_id,'') !~* '^pressure' AND COALESCE(c.name,'') !~ '(压力|压测)' AND et.materialization_status='materialization_expired' ORDER BY et.updated_at DESC LIMIT 5) q; ROLLBACK;"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "rows": []
+    }
+  },
+  "logs": {
+    "rolling-cache-sink-a": {
+      "command": [
+        "docker",
+        "logs",
+        "--timestamps",
+        "--since",
+        "2026-10-15T09:30:19.928700+00:00",
+        "--until",
+        "2026-10-15T10:00:19.928700+00:00",
+        "video-analytics-midterm-rolling-cache-sink-a"
+      ],
+      "returncode": 0,
+      "all_line_count": 37,
+      "first_log_timestamp_utc": "2026-10-15T09:44:54.902067815Z",
+      "last_log_timestamp_utc": "2026-10-15T09:59:57.493830209Z",
+      "first_segment_timestamp_utc": null,
+      "last_segment_timestamp_utc": null,
+      "summary": {
+        "count": 0,
+        "publication_queue_residence_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "publish_total_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "buckets": {
+        "30": [],
+        "60": []
+      },
+      "rows": [],
+      "nonsegment_lines": [
+        "2026-10-15T09:44:54.902067815Z [rolling-cache-maintenance] requested_owner=true root=/media/rolling-cache retention_s=300 max_bytes=0 interval_s=30 read_pin_ttl_s=600",
+        "2026-10-15T09:44:54.902188089Z [rolling-cache-sink] implementation=long-lived-splitmux root=/media/rolling-cache namespace=midterm segment_s=4 http_port=8080",
+        "2026-10-15T09:44:56.527129282Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 1562, \"dry_run\": false, \"duration_ms\": 1562, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:45:26.564034631Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:45:56.593366766Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 6, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:46:26.623789515Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:46:56.661205322Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:47:26.692196481Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:47:56.728029389Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:48:26.763779188Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:48:56.801062816Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:49:26.837983104Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 6, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:49:56.873738194Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:50:26.911031951Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:50:56.943809508Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:51:26.981141473Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:51:57.013759763Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:52:27.043741376Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:52:57.075695203Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:53:27.112986491Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:53:57.120927507Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:54:27.131294640Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:54:57.163785523Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:55:27.201091937Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:55:57.238433156Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:56:27.273684755Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:56:57.281500030Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:57:27.313350076Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 6, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:57:57.350686409Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:58:27.388059228Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:58:57.425337403Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:59:27.462581292Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 6, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "2026-10-15T09:59:57.493830209Z {\"active_pins\": 0, \"bytes_seen\": 0, \"conservative_block_all\": false, \"corrupt_pins_removed\": 0, \"deleted_bytes\": 0, \"discovery_duration_ms\": 7, \"dry_run\": false, \"duration_ms\": 7, \"expired_pins_removed\": 0, \"generation\": 0, \"lock_hold_ms\": 0, \"lock_wait_ms\": 0, \"max_bytes\": 0, \"owner_pid\": 10, \"quota_deleted\": 0, \"remaining_bytes\": 0, \"retention_deleted\": 0, \"retention_s\": 300.0, \"root\": \"/media/rolling-cache\", \"segments_seen\": 0, \"skipped_pinned\": 0, \"status\": \"ok\"}",
+        "",
+        "2026-10-15T09:44:55.066813699Z 2026-10-15 09:44:55,066 INFO rolling_cache_sink.gst publication dispatcher started workers=1 outstanding_limit=128 prepare_group_limit=1 commit_arbitration_enabled=False",
+        "2026-10-15T09:44:55.075487990Z 2026-10-15 09:44:55,075 INFO rolling_cache_sink rolling-cache sink starting endpoint=sub+connect:tcp://replay-raw-fanout-a:5560 root=/media/rolling-cache namespace=midterm epoch=midterm-20261013T000620Z-a3ec4a32 segment_s=4.000 http=0.0.0.0:8080",
+        "2026-10-15T09:44:55.075555199Z  2026-10-15T09:44:55.075Z INFO  insight::savant::savant_rs::py::utils::zeromq > Starting ZMQ source."
+      ]
+    },
+    "rolling-cache-sink-b": {
+      "command": [
+        "docker",
+        "logs",
+        "--timestamps",
+        "--since",
+        "2026-10-15T09:30:19.928700+00:00",
+        "--until",
+        "2026-10-15T10:00:19.928700+00:00",
+        "video-analytics-midterm-rolling-cache-sink-b"
+      ],
+      "returncode": 0,
+      "all_line_count": 6,
+      "first_log_timestamp_utc": "2026-10-15T09:44:54.245129863Z",
+      "last_log_timestamp_utc": "2026-10-15T09:44:54.463736723Z",
+      "first_segment_timestamp_utc": null,
+      "last_segment_timestamp_utc": null,
+      "summary": {
+        "count": 0,
+        "publication_queue_residence_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "publish_total_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "buckets": {
+        "30": [],
+        "60": []
+      },
+      "rows": [],
+      "nonsegment_lines": [
+        "2026-10-15T09:44:54.245129863Z [rolling-cache-maintenance] requested_owner=false root=/media/rolling-cache",
+        "2026-10-15T09:44:54.245246104Z [rolling-cache-sink] implementation=long-lived-splitmux root=/media/rolling-cache namespace=midterm segment_s=4 http_port=8080",
+        "",
+        "2026-10-15T09:44:54.423072628Z 2026-10-15 09:44:54,422 INFO rolling_cache_sink.gst publication dispatcher started workers=1 outstanding_limit=128 prepare_group_limit=1 commit_arbitration_enabled=False",
+        "2026-10-15T09:44:54.463695382Z 2026-10-15 09:44:54,463 INFO rolling_cache_sink rolling-cache sink starting endpoint=sub+connect:tcp://replay-raw-fanout-b:5560 root=/media/rolling-cache namespace=midterm epoch=midterm-20261013T000620Z-a3ec4a32 segment_s=4.000 http=0.0.0.0:8080",
+        "2026-10-15T09:44:54.463736723Z  2026-10-15T09:44:54.463Z INFO  insight::savant::savant_rs::py::utils::zeromq > Starting ZMQ source."
+      ]
+    }
+  }
+}

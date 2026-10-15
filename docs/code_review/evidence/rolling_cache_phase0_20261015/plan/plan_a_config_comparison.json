@@ -1,0 +1,1358 @@
+{
+  "captured_at_utc": "2026-10-15T10:02:27.615573+00:00",
+  "source": "docs/code_review/evidence/rolling_cache_phase0_20261015/plan/readonly_plan_a_capture_images.json",
+  "compose_version": "Docker Compose version v2.27.0",
+  "clean_environment": {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": "/home/user",
+    "USER": "user",
+    "LANG": "C",
+    "TZ": "Asia/Seoul"
+  },
+  "ambient_matching_key_names": [],
+  "files": {
+    "scripts/midterm_start.sh": {
+      "exists": true,
+      "sha256": "3372e2a672c98c8b0cd2ebb6e64e9dbf8080c7ff4deb49af5e74813ae9492711",
+      "bytes": 16308
+    },
+    "scripts/runtime/precreate_operator_dual_runtime.sh": {
+      "exists": true,
+      "sha256": "badde089de4a47c4768f072bb0268b5aa68a9f5effd8c204f80c35216a91f251",
+      "bytes": 2480
+    },
+    "infra/docker-compose.midterm.yml": {
+      "exists": true,
+      "sha256": "2517b188a835f70e32a24fe7892446b9521f80882ca8f50200cf933b269133b5",
+      "bytes": 85761
+    },
+    "infra/midterm-storage.override.yml": {
+      "exists": true,
+      "sha256": "8d102740e81589f2418e81f458a531e6c31a30026da057c43ea1ee704565cfae",
+      "bytes": 3548
+    },
+    "infra/operator-dual-runtime.override.yml": {
+      "exists": true,
+      "sha256": "ee47716d17f9240a4241cbed5d8baa014a7ab4a794c8d746724d3f8807f69e3e",
+      "bytes": 488
+    },
+    "services/api/app/services/runtime_control.py": {
+      "exists": true,
+      "sha256": "57aabcf4cf1211c20dcb945fb69e1c8d2292c9e91c2f766af4803fef1f3730fe",
+      "bytes": 11685
+    },
+    "services/api/app/services/runtime_topology.py": {
+      "exists": true,
+      "sha256": "b52e8e7f1c3add408cc81c205ffebd5d9880708cf1d9772ec309ea3caeeb638b",
+      "bytes": 87290
+    },
+    "services/api/app/services/runtime_apply.py": {
+      "exists": true,
+      "sha256": "3935477e664090a71cc61bd54ada7e0f3fea655142fce31d833a7d9ab83b8328",
+      "bytes": 91051
+    },
+    "services/api/app/routers/runtime.py": {
+      "exists": true,
+      "sha256": "4a51c816618f7773c6f8d62c09984790cbd8a56e84917c9a0b017e4854fc228c",
+      "bytes": 8325
+    },
+    "infra/env/midterm.env": {
+      "exists": true,
+      "sha256": "ff956bf0cbe064533664345b379cb2788ae988b03e1ff84b863195f2fc1130d2",
+      "bytes": 10346
+    }
+  },
+  "config_results": {
+    "base_clean": {
+      "args": [
+        "docker",
+        "compose",
+        "--env-file",
+        "/home/user/video-analytics/infra/env/midterm.env",
+        "-f",
+        "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "--profile",
+        "operator-dual-runtime",
+        "config",
+        "--format",
+        "json"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "project_name": "video-analytics-midterm",
+      "all_service_count": 27
+    },
+    "storage_operator_clean": {
+      "args": [
+        "docker",
+        "compose",
+        "--env-file",
+        "/home/user/video-analytics/infra/env/midterm.env",
+        "-f",
+        "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "-f",
+        "/home/user/video-analytics/infra/midterm-storage.override.yml",
+        "-f",
+        "/home/user/video-analytics/infra/operator-dual-runtime.override.yml",
+        "--profile",
+        "operator-dual-runtime",
+        "config",
+        "--format",
+        "json"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "project_name": "video-analytics-midterm",
+      "all_service_count": 27
+    }
+  },
+  "service_diffs": {
+    "base_clean": {
+      "rolling-cache-sink-a": {
+        "image_id": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+        "rendered_image": "video-analytics-midterm-rolling-cache-sink:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true
+          }
+        ],
+        "effective_env_difference_count": 0,
+        "effective_env_differences": []
+      },
+      "rolling-cache-sink-b": {
+        "image_id": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+        "rendered_image": "video-analytics-midterm-rolling-cache-sink:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true
+          }
+        ],
+        "effective_env_difference_count": 0,
+        "effective_env_differences": []
+      },
+      "media-worker": {
+        "image_id": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+        "rendered_image": "video-analytics-midterm-media-worker:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_media_worker_rolling_cache.override.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/media-worker",
+            "target": "/app",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/libs",
+            "target": "/app/libs",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/modules/savant_security/config",
+            "target": "/opt/savant/src/module/config",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/media-worker",
+            "target": "/app",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/libs",
+            "target": "/app/libs",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/modules/savant_security/config",
+            "target": "/opt/savant/src/module/config",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          }
+        ],
+        "effective_env_difference_count": 24,
+        "effective_env_differences": [
+          {
+            "key": "EVIDENCE_DENSITY_PROFILE",
+            "live": "high_density",
+            "rendered_with_same_image_defaults": "normal"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",
+            "live": "2400",
+            "rendered_with_same_image_defaults": "100"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_MAX_SCAN",
+            "live": "500",
+            "rendered_with_same_image_defaults": "20000"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS",
+            "live": "10000",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES",
+            "live": "64",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S",
+            "live": "900",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL",
+            "live": "false",
+            "rendered_with_same_image_defaults": "true"
+          },
+          {
+            "key": "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY",
+            "live": "0"
+          },
+          {
+            "key": "MEDIA_WORKER_FINALIZER_PROCESS_WORKERS",
+            "live": "4",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "MEDIA_WORKER_FINALIZER_WORKERS",
+            "live": "4",
+            "rendered_with_same_image_defaults": "32"
+          },
+          {
+            "key": "MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
+            "live": "false"
+          },
+          {
+            "key": "MEDIA_WORKER_REMUX_QUEUE_CAPACITY",
+            "live": "1",
+            "rendered_with_same_image_defaults": "4"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
+            "live": "2"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
+            "live": "60",
+            "rendered_with_same_image_defaults": "30"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+            "live": "2048",
+            "rendered_with_same_image_defaults": "256"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
+            "live": "268435456"
+          },
+          {
+            "key": "ROLLING_CACHE_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "ROLLING_CACHE_FALLBACK_TO_REPLAY",
+            "live": "false",
+            "rendered_with_same_image_defaults": "true"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL",
+            "live": "4",
+            "rendered_with_same_image_defaults": "16"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+            "live": "9",
+            "rendered_with_same_image_defaults": "1"
+          },
+          {
+            "key": "ROLLING_CACHE_RETENTION_SECONDS",
+            "live": "4020",
+            "rendered_with_same_image_defaults": "300"
+          },
+          {
+            "key": "ROLLING_CACHE_SOURCES",
+            "live": {
+              "count": 60,
+              "first": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_00",
+              "last": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_59"
+            },
+            "rendered_with_same_image_defaults": {
+              "count": 0,
+              "first": "",
+              "last": ""
+            }
+          }
+        ]
+      }
+    },
+    "storage_operator_clean": {
+      "rolling-cache-sink-a": {
+        "image_id": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+        "rendered_image": "video-analytics-midterm-rolling-cache-sink:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache",
+            "target": "/media/rolling-cache",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache-materialized",
+            "target": "/media/rolling-cache-materialized",
+            "read_only": false
+          }
+        ],
+        "effective_env_difference_count": 0,
+        "effective_env_differences": []
+      },
+      "rolling-cache-sink-b": {
+        "image_id": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+        "rendered_image": "video-analytics-midterm-rolling-cache-sink:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+            "target": "/opt/rolling-cache-sink/app",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+            "target": "/opt/rolling-cache-sink-entrypoint.sh",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+            "target": "/opt/rolling-cache-maintenance.py",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache",
+            "target": "/media/rolling-cache",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache-materialized",
+            "target": "/media/rolling-cache-materialized",
+            "read_only": false
+          }
+        ],
+        "effective_env_difference_count": 0,
+        "effective_env_differences": []
+      },
+      "media-worker": {
+        "image_id": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+        "rendered_image": "video-analytics-midterm-media-worker:latest",
+        "rendered_tag_points_to_current_image": true,
+        "live_cpuset_cpus": "",
+        "rendered_cpuset_cpus": "",
+        "live_config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_media_worker_rolling_cache.override.yml",
+        "before_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/media-worker",
+            "target": "/app",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/libs",
+            "target": "/app/libs",
+            "read_only": true,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false,
+            "propagation": "rprivate"
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/modules/savant_security/config",
+            "target": "/opt/savant/src/module/config",
+            "read_only": true,
+            "propagation": "rprivate"
+          }
+        ],
+        "rendered_mounts": [
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/services/media-worker",
+            "target": "/app",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/libs",
+            "target": "/app/libs",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics/modules/savant_security/config",
+            "target": "/opt/savant/src/module/config",
+            "read_only": true
+          },
+          {
+            "type": "bind",
+            "source": "/data/video-analytics/media",
+            "target": "/media",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache",
+            "target": "/media/rolling-cache",
+            "read_only": false
+          },
+          {
+            "type": "bind",
+            "source": "/home/user/video-analytics-fast/rolling-cache-materialized",
+            "target": "/media/rolling-cache-materialized",
+            "read_only": false
+          }
+        ],
+        "effective_env_difference_count": 24,
+        "effective_env_differences": [
+          {
+            "key": "EVIDENCE_DENSITY_PROFILE",
+            "live": "high_density",
+            "rendered_with_same_image_defaults": "normal"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",
+            "live": "2400",
+            "rendered_with_same_image_defaults": "100"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_MAX_SCAN",
+            "live": "500",
+            "rendered_with_same_image_defaults": "20000"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS",
+            "live": "10000",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES",
+            "live": "64",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S",
+            "live": "900",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL",
+            "live": "false",
+            "rendered_with_same_image_defaults": "true"
+          },
+          {
+            "key": "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY",
+            "live": "0"
+          },
+          {
+            "key": "MEDIA_WORKER_FINALIZER_PROCESS_WORKERS",
+            "live": "4",
+            "rendered_with_same_image_defaults": "0"
+          },
+          {
+            "key": "MEDIA_WORKER_FINALIZER_WORKERS",
+            "live": "4",
+            "rendered_with_same_image_defaults": "32"
+          },
+          {
+            "key": "MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
+            "live": "false"
+          },
+          {
+            "key": "MEDIA_WORKER_REMUX_QUEUE_CAPACITY",
+            "live": "1",
+            "rendered_with_same_image_defaults": "4"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
+            "live": "2"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
+            "live": "60",
+            "rendered_with_same_image_defaults": "30"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+            "live": "2048",
+            "rendered_with_same_image_defaults": "256"
+          },
+          {
+            "key": "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
+            "live": "268435456"
+          },
+          {
+            "key": "ROLLING_CACHE_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "ROLLING_CACHE_FALLBACK_TO_REPLAY",
+            "live": "false",
+            "rendered_with_same_image_defaults": "true"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_ENABLED",
+            "live": "true",
+            "rendered_with_same_image_defaults": "false"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL",
+            "live": "4",
+            "rendered_with_same_image_defaults": "16"
+          },
+          {
+            "key": "ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+            "live": "9",
+            "rendered_with_same_image_defaults": "1"
+          },
+          {
+            "key": "ROLLING_CACHE_RETENTION_SECONDS",
+            "live": "4020",
+            "rendered_with_same_image_defaults": "300"
+          },
+          {
+            "key": "ROLLING_CACHE_SOURCES",
+            "live": {
+              "count": 60,
+              "first": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_00",
+              "last": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_59"
+            },
+            "rendered_with_same_image_defaults": {
+              "count": 0,
+              "first": "",
+              "last": ""
+            }
+          }
+        ]
+      }
+    }
+  },
+  "api": {
+    "topology": {
+      "saved_config": {
+        "runtime_profile": "production_t4_40",
+        "pipeline_mode": "full_evidence",
+        "topology_mode": "dual_same_gpu",
+        "shard_strategy": "balanced",
+        "streams_per_branch": 20,
+        "manual_assignments": {},
+        "branches": {
+          "a": {
+            "gpu_id": 0,
+            "savant_batch_size": 4,
+            "pose_batch_size": 4,
+            "face_detector_batch_size": 4,
+            "face_embedding_batch_size": 16,
+            "face_infer_interval": 3,
+            "max_parallel_streams": 64,
+            "analysis_fps": "4/1",
+            "analysis_min_fps": "99/25",
+            "savant_max_fps": "4/1",
+            "savant_min_fps": "99/25",
+            "batched_push_timeout": 10000,
+            "face_identity_refresh_ms": 5000
+          },
+          "b": {
+            "gpu_id": 0,
+            "savant_batch_size": 4,
+            "pose_batch_size": 4,
+            "face_detector_batch_size": 4,
+            "face_embedding_batch_size": 16,
+            "face_infer_interval": 3,
+            "max_parallel_streams": 64,
+            "analysis_fps": "4/1",
+            "analysis_min_fps": "99/25",
+            "savant_max_fps": "4/1",
+            "savant_min_fps": "99/25",
+            "batched_push_timeout": 10000,
+            "face_identity_refresh_ms": 5000
+          }
+        }
+      },
+      "plan": {
+        "runtime_profile": "production_t4_40",
+        "pipeline_mode": "full_evidence",
+        "full_pipeline": true,
+        "expected_source_count": 40,
+        "cuda_mps_enabled": true,
+        "mps_savant_percentage": 45,
+        "mps_adaface_percentage": 10,
+        "recording_cooldown_seconds": 60,
+        "media_worker_max_active": 10,
+        "media_worker_remux_workers": 5,
+        "media_worker_finalizer_workers": 5,
+        "materialization_ready_segment_grace_seconds": 1,
+        "frame_cache_sidecar_max_scan": 500,
+        "cpuset_cpus": {
+          "savant_a": "0-2,8-10",
+          "savant_b": "3-5,11-13",
+          "forwarder_a": "6,14",
+          "forwarder_b": "6,14",
+          "roi_worker": "6,14",
+          "event_worker": "15",
+          "media_worker": "6-7,14-15",
+          "rolling_sink_a": "0-15",
+          "rolling_sink_b": "0-15"
+        },
+        "roi_batch_timeout_ms": 200,
+        "rolling_prefill_seconds": 25,
+        "rolling_retention_seconds": 600,
+        "requested_mode": "dual_same_gpu",
+        "effective_mode": "dual_same_gpu",
+        "dual": true,
+        "shard_strategy": "balanced",
+        "streams_per_branch": 20,
+        "enabled_source_count": 0,
+        "total_camera_count": 61,
+        "available_gpus": [],
+        "branches": [
+          {
+            "branch_id": "a",
+            "gpu_id": 0,
+            "source_count": 0,
+            "source_ids": [],
+            "camera_names": [],
+            "config": {
+              "branch_id": "a",
+              "gpu_id": 0,
+              "savant_batch_size": 4,
+              "pose_batch_size": 4,
+              "face_detector_batch_size": 4,
+              "face_embedding_batch_size": 16,
+              "face_infer_interval": 3,
+              "max_parallel_streams": 64,
+              "analysis_fps": "4/1",
+              "analysis_min_fps": "99/25",
+              "savant_max_fps": "4/1",
+              "savant_min_fps": "99/25",
+              "batched_push_timeout": 10000,
+              "face_identity_refresh_ms": 5000
+            },
+            "containers": {
+              "savant": "video-analytics-midterm-savant-a",
+              "forwarder": "video-analytics-midterm-replay-raw-fanout-a",
+              "replay": "video-analytics-midterm-replay-a",
+              "video_sink": "video-analytics-midterm-video-file-sink-a",
+              "rolling_sink": "video-analytics-midterm-rolling-cache-sink-a"
+            }
+          },
+          {
+            "branch_id": "b",
+            "gpu_id": 0,
+            "source_count": 0,
+            "source_ids": [],
+            "camera_names": [],
+            "config": {
+              "branch_id": "b",
+              "gpu_id": 0,
+              "savant_batch_size": 4,
+              "pose_batch_size": 4,
+              "face_detector_batch_size": 4,
+              "face_embedding_batch_size": 16,
+              "face_infer_interval": 3,
+              "max_parallel_streams": 64,
+              "analysis_fps": "4/1",
+              "analysis_min_fps": "99/25",
+              "savant_max_fps": "4/1",
+              "savant_min_fps": "99/25",
+              "batched_push_timeout": 10000,
+              "face_identity_refresh_ms": 5000
+            },
+            "containers": {
+              "savant": "video-analytics-midterm-savant-b",
+              "forwarder": "video-analytics-midterm-replay-raw-fanout-b",
+              "replay": "video-analytics-midterm-replay-b",
+              "video_sink": "video-analytics-midterm-video-file-sink-b",
+              "rolling_sink": "video-analytics-midterm-rolling-cache-sink-b"
+            }
+          }
+        ],
+        "replay_shards": {
+          "default_shard_id": "replay-a",
+          "shards": [
+            {
+              "shard_id": "replay-a",
+              "replay_api_url": "http://replay-a:8080",
+              "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
+              "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
+              "source_ids": []
+            },
+            {
+              "shard_id": "replay-b",
+              "replay_api_url": "http://replay-b:8080",
+              "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
+              "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
+              "source_ids": []
+            }
+          ]
+        },
+        "sources": {
+          "sources": {}
+        }
+      },
+      "preflight": {
+        "ok": false,
+        "checks": [
+          {
+            "name": "profile_enabled_source_count",
+            "ok": false,
+            "fatal": true,
+            "expected_source_count": 40,
+            "source_count": 0
+          },
+          {
+            "name": "a_savant_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-savant-a",
+            "state": "exited"
+          },
+          {
+            "name": "a_forwarder_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-replay-raw-fanout-a",
+            "state": "exited"
+          },
+          {
+            "name": "a_replay_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-replay-a",
+            "state": "exited"
+          },
+          {
+            "name": "a_video_sink_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-video-file-sink-a",
+            "state": "exited"
+          },
+          {
+            "name": "a_rolling_sink_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-rolling-cache-sink-a",
+            "state": "running"
+          },
+          {
+            "name": "a_source_count_within_parallel_limit",
+            "ok": true,
+            "fatal": true,
+            "source_count": 0,
+            "max_parallel_streams": 64
+          },
+          {
+            "name": "a_gpu_known",
+            "ok": true,
+            "fatal": false,
+            "gpu_id": 0,
+            "available_gpus": []
+          },
+          {
+            "name": "b_savant_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-savant-b",
+            "state": "exited"
+          },
+          {
+            "name": "b_forwarder_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-replay-raw-fanout-b",
+            "state": "exited"
+          },
+          {
+            "name": "b_replay_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-replay-b",
+            "state": "exited"
+          },
+          {
+            "name": "b_video_sink_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-video-file-sink-b",
+            "state": "exited"
+          },
+          {
+            "name": "b_rolling_sink_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-rolling-cache-sink-b",
+            "state": "running"
+          },
+          {
+            "name": "b_source_count_within_parallel_limit",
+            "ok": true,
+            "fatal": true,
+            "source_count": 0,
+            "max_parallel_streams": 64
+          },
+          {
+            "name": "b_gpu_known",
+            "ok": true,
+            "fatal": false,
+            "gpu_id": 0,
+            "available_gpus": []
+          },
+          {
+            "name": "savant_b_model_cache_ready",
+            "ok": true,
+            "fatal": true,
+            "model_root": "/data/video-analytics/models-savant-b",
+            "missing_models": []
+          },
+          {
+            "name": "full_pipeline_roi_worker_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-adaface-roi-worker",
+            "state": "exited"
+          },
+          {
+            "name": "full_pipeline_event_worker_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-event-worker",
+            "state": "running"
+          },
+          {
+            "name": "full_pipeline_media_worker_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-media-worker",
+            "state": "running"
+          },
+          {
+            "name": "full_pipeline_cuda_mps_container_present",
+            "ok": true,
+            "fatal": true,
+            "container": "video-analytics-midterm-cuda-mps-operator",
+            "state": "exited"
+          }
+        ]
+      }
+    },
+    "control": {
+      "note": "mode is hard-coded to single in runtime_control_status; inspect individual states",
+      "data": {
+        "mode": "single",
+        "single": [
+          {
+            "name": "video-analytics-midterm-source-adapter",
+            "present": false,
+            "state": "missing"
+          },
+          {
+            "name": "video-analytics-midterm-event-worker",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 1
+          },
+          {
+            "name": "video-analytics-midterm-face-worker",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 1
+          },
+          {
+            "name": "video-analytics-midterm-clip-worker",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 1
+          },
+          {
+            "name": "video-analytics-midterm-media-worker",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 1
+          },
+          {
+            "name": "video-analytics-midterm-savant",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "healthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-analysis-forwarder",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "healthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-replay-service",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-video-file-sink",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          }
+        ],
+        "dual": [
+          {
+            "name": "video-analytics-midterm-replay-raw-fanout-a",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-replay-raw-fanout-b",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-analysis-forwarder-a",
+            "present": true,
+            "state": "created",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-analysis-forwarder-b",
+            "present": true,
+            "state": "created",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-replay-a",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-replay-b",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-savant-a",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-savant-b",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-video-file-sink-a",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-video-file-sink-b",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-adaface-roi-worker",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-cuda-mps-operator",
+            "present": true,
+            "state": "exited",
+            "running": false,
+            "restarting": false,
+            "health": "unhealthy",
+            "restart_count": 0
+          }
+        ],
+        "management": [
+          {
+            "name": "phase0-postgres",
+            "present": false,
+            "state": "missing"
+          },
+          {
+            "name": "video-analytics-midterm-redis",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "healthy",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-api",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          },
+          {
+            "name": "video-analytics-midterm-evidence-viewer",
+            "present": true,
+            "state": "running",
+            "running": true,
+            "restarting": false,
+            "health": "",
+            "restart_count": 0
+          }
+        ]
+      }
+    },
+    "apply_status": {
+      "job_id": null,
+      "status": "stopped",
+      "phase": "stopped",
+      "percent": 0,
+      "message": "摄像头采集与双分支推理已停止；已产生的 evidence 继续收尾",
+      "started_at": null,
+      "finished_at": "2026-07-15T15:13:34.876259Z",
+      "rolling_cache": null,
+      "error": null,
+      "result": {
+        "disabled_camera_count": 0,
+        "stop_mode": "capture_and_inference",
+        "drain_workers_left_running": [
+          "video-analytics-midterm-event-worker",
+          "video-analytics-midterm-media-worker",
+          "video-analytics-midterm-rolling-cache-sink-a",
+          "video-analytics-midterm-rolling-cache-sink-b"
+        ]
+      },
+      "updated_at": "2026-07-15T15:13:34.876322Z"
+    }
+  }
+}

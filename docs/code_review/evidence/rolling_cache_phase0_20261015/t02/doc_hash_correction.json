@@ -1,0 +1,27 @@
+{
+  "correction_recorded_date_kst": "2026-10-15",
+  "document": "docs/code_review/pressure60_allalg_uos157_1h_2026-10-13.md",
+  "field": "10-13 source report.json SHA256",
+  "draft_incorrect_hash": "f12021e71e70fef6650fb748623a990291437487906a972b1a77b6292ec806de7",
+  "correct_hash": "7287175334e90507666883efc4948a95169fc5b4ac1dfe771b4289b2d021c625",
+  "reason": "The draft hash was manually entered without a source in the captured machine evidence. It was a documentation error, not an observed alternate artifact hash.",
+  "existing_evidence": [
+    {
+      "capture_file": "extract_reports.capture.json",
+      "captured_at_utc": "2026-10-15T09:57:25.019Z",
+      "captured_at_kst": "2026-10-15T18:57:25.019+09:00",
+      "stdout_json_field": "runs.1013.report_sha256",
+      "value": "7287175334e90507666883efc4948a95169fc5b4ac1dfe771b4289b2d021c625"
+    },
+    {
+      "capture_file": "analyze_art.capture.json",
+      "captured_at_utc": "2026-10-15T10:06:38.335Z",
+      "captured_at_kst": "2026-10-15T19:06:38.335+09:00",
+      "stdout_json_field": "runs.1013.report_sha256",
+      "value": "7287175334e90507666883efc4948a95169fc5b4ac1dfe771b4289b2d021c625"
+    }
+  ],
+  "canonical_summary": "t02_findings.json:runs.1013.report_sha256",
+  "artifact_change_between_captures": "No evidence of a change: the two independently captured hashes are identical.",
+  "new_remote_reads_for_correction": false
+}

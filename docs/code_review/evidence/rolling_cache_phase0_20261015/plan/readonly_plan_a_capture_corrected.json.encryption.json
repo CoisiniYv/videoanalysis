@@ -1,0 +1,9 @@
+{
+  "cipher": "AES-256-GCM",
+  "iv_hex": "c44fa9b3a0e37e507eafb971",
+  "auth_tag_hex": "e2a95439fbf55a4e04676a3a130e97dd",
+  "plaintext_sha256": "bb25f00a8eab8f67037e927813d506df480c3caa196c77ef20a609f4bfd3f857",
+  "ciphertext_sha256": "3a65511cde6954a13c675f9238afbde89e3182c79cbc8e0e525142733fc0ce6e",
+  "private_key_path": "/Users/khonsu/.codex/private-evidence/rolling_cache_phase0_20261015/snapshot-aes256gcm.key",
+  "original_path": "/Users/khonsu/.codex/private-evidence/rolling_cache_phase0_20261015/plan/readonly_plan_a_capture_corrected.json"
+}

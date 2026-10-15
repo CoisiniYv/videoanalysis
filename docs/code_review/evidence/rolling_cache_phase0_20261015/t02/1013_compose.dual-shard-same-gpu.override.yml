@@ -1,0 +1,111 @@
+services:
+  savant-a:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: '0'
+      BATCH_SIZE: '4'
+      POSE_BATCH_SIZE: '4'
+      FACE_DETECTOR_BATCH_SIZE: '4'
+      FACE_EMBEDDING_BATCH_SIZE: '16'
+      FACE_INFER_INTERVAL: '4'
+      FACE_EMBEDDING_INFER_INTERVAL: '4'
+      MAX_PARALLEL_STREAMS: '64'
+      MAX_SAME_SOURCE_FRAMES: '1'
+      BATCHED_PUSH_TIMEOUT: '40000'
+      SAVANT_STAGE_METRICS_ENABLED: 'true'
+      SAVANT_MODULE_FILE: /data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/module.pressure.yml
+      OUTPUT_FRAME: 'null'
+      FRAME_ANNOTATION_SOURCE_STREAM_ENABLED: 'true'
+      FRAME_ANNOTATION_STREAM_MODE: dual
+      FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN: '10000'
+      FACE_SECONDARY_TRACK_ID_ENABLED: 'false'
+      FACE_ROI_EXPORT_ENABLED: 'true'
+      FACE_ROI_STREAM: security.face_rois.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2
+      FACE_ROI_STREAM_MAXLEN: '20000'
+      FACE_ROI_QUEUE_MAXSIZE: '4096'
+      FACE_ROI_TTL_MS: '5000'
+      FACE_ROI_JPEG_QUALITY: '95'
+      ADAFACE_INPUT_OBJECT: disabled.face
+      FACE_OBSERVATION_EXPORT_ENABLED: 'false'
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '0'
+            capabilities:
+            - gpu
+  savant-b:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: '0'
+      CUDA_VISIBLE_DEVICES: '0'
+      BATCH_SIZE: '4'
+      POSE_BATCH_SIZE: '4'
+      FACE_DETECTOR_BATCH_SIZE: '4'
+      FACE_EMBEDDING_BATCH_SIZE: '16'
+      FACE_INFER_INTERVAL: '4'
+      FACE_EMBEDDING_INFER_INTERVAL: '4'
+      MAX_PARALLEL_STREAMS: '64'
+      MAX_SAME_SOURCE_FRAMES: '1'
+      BATCHED_PUSH_TIMEOUT: '40000'
+      SAVANT_STAGE_METRICS_ENABLED: 'true'
+      SAVANT_MODULE_FILE: /data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/module.pressure.yml
+      OUTPUT_FRAME: 'null'
+      FRAME_ANNOTATION_SOURCE_STREAM_ENABLED: 'true'
+      FRAME_ANNOTATION_STREAM_MODE: dual
+      FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN: '10000'
+      FACE_SECONDARY_TRACK_ID_ENABLED: 'false'
+      FACE_ROI_EXPORT_ENABLED: 'true'
+      FACE_ROI_STREAM: security.face_rois.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2
+      FACE_ROI_STREAM_MAXLEN: '20000'
+      FACE_ROI_QUEUE_MAXSIZE: '4096'
+      FACE_ROI_TTL_MS: '5000'
+      FACE_ROI_JPEG_QUALITY: '95'
+      ADAFACE_INPUT_OBJECT: disabled.face
+      FACE_OBSERVATION_EXPORT_ENABLED: 'false'
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - '0'
+            capabilities:
+            - gpu
+  replay-raw-fanout-a:
+    depends_on: !override
+    - savant-a
+    environment:
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-a:5557
+      FORWARDER_SAMPLER_ENABLED: 'true'
+      ANALYSIS_FPS: 4/1
+      ANALYSIS_MIN_FPS: 99/25
+      FORWARDER_QUEUE_MAX_SIZE: '8192'
+      FORWARDER_RECEIVE_HWM: '10000'
+      FORWARDER_SEND_TIMEOUT_MS: '2000'
+      FORWARDER_SEND_RETRIES: '3'
+      FORWARDER_SEND_HWM: '1000'
+  replay-raw-fanout-b:
+    depends_on: !override
+    - savant-b
+    environment:
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-b:5557
+      FORWARDER_SAMPLER_ENABLED: 'true'
+      ANALYSIS_FPS: 4/1
+      ANALYSIS_MIN_FPS: 99/25
+      FORWARDER_QUEUE_MAX_SIZE: '8192'
+      FORWARDER_RECEIVE_HWM: '10000'
+      FORWARDER_SEND_TIMEOUT_MS: '2000'
+      FORWARDER_SEND_RETRIES: '3'
+      FORWARDER_SEND_HWM: '1000'
+  adaface-roi-worker:
+    profiles:
+    - dual-4090-two-source
+    environment:
+      FACE_ROI_STREAM: security.face_rois.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2
+      FACE_ROI_CONSUMER_GROUP: adaface-roi-pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2
+      FACE_ROI_CONSUMER_NAME: adaface-roi-worker-1
+      FACE_ROI_TTL_MS: '5000'
+      FACE_ROI_BATCH_TIMEOUT_MS: '10'
+      FACE_EMBEDDING_BATCH_SIZE: '16'
+    restart: 'no'

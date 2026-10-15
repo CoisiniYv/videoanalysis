@@ -1,0 +1,15 @@
+{
+  "checked_at_utc": "2026-10-15T10:17:27.156Z",
+  "snapshot_containers": 30,
+  "all_required_inspect_fields": true,
+  "baseline_keys": 45,
+  "current_keys": 308,
+  "comparison": "45 recorded keys match; 263 baseline values unavailable",
+  "storage_commands": "all required commands returned 0",
+  "encrypted_artifacts_verified": 4,
+  "json_files_parsed": 42,
+  "sensitive_value_findings": [],
+  "document_links_checked": 22,
+  "document_links_missing": 0,
+  "scope": "Local documentary and artifact verification only; no runtime tests or service changes"
+}

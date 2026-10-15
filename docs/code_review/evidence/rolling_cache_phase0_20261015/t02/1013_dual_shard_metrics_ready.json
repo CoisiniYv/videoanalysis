@@ -1,0 +1,77 @@
+{
+  "pending": {},
+  "observations": [
+    {
+      "observed_at": "2026-10-12T21:30:54.126853+00:00",
+      "name": "replay-a-forwarder-health",
+      "url": "http://127.0.0.1:18185/healthz",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:54.127418+00:00",
+      "name": "replay-b-forwarder-health",
+      "url": "http://127.0.0.1:18186/healthz",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:54.127942+00:00",
+      "name": "replay-a-savant-metrics",
+      "url": "http://127.0.0.1:18180/metrics",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:54.128639+00:00",
+      "name": "replay-b-savant-metrics",
+      "url": "http://127.0.0.1:18181/metrics",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:54.131074+00:00",
+      "name": "adaface-roi-worker-metrics",
+      "url": "http://127.0.0.1:18187/metrics",
+      "ready": true
+    },
+    {
+      "observed_at": "2026-10-12T21:30:56.133141+00:00",
+      "name": "replay-a-forwarder-health",
+      "url": "http://127.0.0.1:18185/healthz",
+      "ready": true
+    },
+    {
+      "observed_at": "2026-10-12T21:30:56.134426+00:00",
+      "name": "replay-b-forwarder-health",
+      "url": "http://127.0.0.1:18186/healthz",
+      "ready": true
+    },
+    {
+      "observed_at": "2026-10-12T21:30:56.134822+00:00",
+      "name": "replay-a-savant-metrics",
+      "url": "http://127.0.0.1:18180/metrics",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:56.135193+00:00",
+      "name": "replay-b-savant-metrics",
+      "url": "http://127.0.0.1:18181/metrics",
+      "ready": false,
+      "error": "ConnectionResetError(104, 'Connection reset by peer')"
+    },
+    {
+      "observed_at": "2026-10-12T21:30:58.136935+00:00",
+      "name": "replay-a-savant-metrics",
+      "url": "http://127.0.0.1:18180/metrics",
+      "ready": true
+    },
+    {
+      "observed_at": "2026-10-12T21:30:58.137741+00:00",
+      "name": "replay-b-savant-metrics",
+      "url": "http://127.0.0.1:18181/metrics",
+      "ready": true
+    }
+  ]
+}

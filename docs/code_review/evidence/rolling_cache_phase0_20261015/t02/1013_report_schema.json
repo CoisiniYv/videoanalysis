@@ -1,0 +1,5450 @@
+[
+  {
+    "path": "run_id",
+    "value": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2"
+  },
+  {
+    "path": "created_at",
+    "value": "2026-10-12T21:30:26.437738+00:00"
+  },
+  {
+    "path": "config",
+    "type": "dict",
+    "count": 110
+  },
+  {
+    "path": "config.run_id",
+    "value": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2"
+  },
+  {
+    "path": "config.stream_count",
+    "value": 60
+  },
+  {
+    "path": "config.rtsp_uri",
+    "value": "rtsp://192.168.1.105:8554/live/1080movie"
+  },
+  {
+    "path": "config.fps",
+    "value": "4/1"
+  },
+  {
+    "path": "config.min_fps",
+    "value": "99/25"
+  },
+  {
+    "path": "config.batch_size",
+    "value": 4
+  },
+  {
+    "path": "config.pose_batch_size",
+    "value": 4
+  },
+  {
+    "path": "config.face_detector_batch_size",
+    "value": 4
+  },
+  {
+    "path": "config.face_embedding_batch_size",
+    "value": 16
+  },
+  {
+    "path": "config.face_infer_interval",
+    "value": 4
+  },
+  {
+    "path": "config.face_embedding_infer_interval",
+    "value": 4
+  },
+  {
+    "path": "config.max_parallel_streams",
+    "value": 64
+  },
+  {
+    "path": "config.batched_push_timeout",
+    "value": 40000
+  },
+  {
+    "path": "config.duration_s",
+    "value": 3600
+  },
+  {
+    "path": "config.sample_interval_s",
+    "value": 30
+  },
+  {
+    "path": "config.drain_s",
+    "value": 600
+  },
+  {
+    "path": "config.guard_wait_s",
+    "value": 1200
+  },
+  {
+    "path": "config.keep_evidence",
+    "value": -1
+  },
+  {
+    "path": "config.evidence_group_size",
+    "value": 10
+  },
+  {
+    "path": "config.evidence_policy_groups",
+    "type": "list",
+    "count": 6
+  },
+  {
+    "path": "config.pressure_materialization_event_type_quotas",
+    "value": ""
+  },
+  {
+    "path": "config.pressure_disable_evidence_admission",
+    "value": true
+  },
+  {
+    "path": "config.pressure_algorithm_cooldown_s",
+    "value": 60
+  },
+  {
+    "path": "config.artifact_dir",
+    "value": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2"
+  },
+  {
+    "path": "config.db_url",
+    "value": "postgresql://<redacted>@127.0.0.1:5439/video_analytics"
+  },
+  {
+    "path": "config.redis_url",
+    "value": "redis://127.0.0.1:6396/0"
+  },
+  {
+    "path": "config.api_base",
+    "value": "http://127.0.0.1:8090/api/v1"
+  },
+  {
+    "path": "config.compose_file",
+    "value": "infra/docker-compose.midterm.yml"
+  },
+  {
+    "path": "config.env_file",
+    "value": "infra/env/midterm.env"
+  },
+  {
+    "path": "config.evidence_root",
+    "value": "/data/video-analytics/media/evidence"
+  },
+  {
+    "path": "config.replay_epoch_root",
+    "value": "/data/video-analytics/media/replay-sink-output/midterm/epochs"
+  },
+  {
+    "path": "config.force_runtime_restart",
+    "value": false
+  },
+  {
+    "path": "config.no_quiesce_before_guard",
+    "value": false
+  },
+  {
+    "path": "config.rtsp_republish_output_base",
+    "value": ""
+  },
+  {
+    "path": "config.rtsp_republish_input_uri",
+    "value": "rtsp://192.168.1.105:8554/live/1080movie"
+  },
+  {
+    "path": "config.rtsp_republish_mode",
+    "value": "copy"
+  },
+  {
+    "path": "config.rtsp_republish_local_server",
+    "value": false
+  },
+  {
+    "path": "config.rtsp_republish_local_server_image",
+    "value": "bluenviron/mediamtx:1.11.3"
+  },
+  {
+    "path": "config.rtsp_republish_local_server_network",
+    "value": "video-analytics-midterm_default"
+  },
+  {
+    "path": "config.rtsp_republish_local_server_gateway",
+    "value": ""
+  },
+  {
+    "path": "config.rtsp_republish_local_server_host_port",
+    "value": 18554
+  },
+  {
+    "path": "config.rtsp_republish_warmup_s",
+    "value": 10
+  },
+  {
+    "path": "config.rtsp_republish_readiness_timeout_s",
+    "value": 120
+  },
+  {
+    "path": "config.rtsp_republish_readiness_parallelism",
+    "value": 4
+  },
+  {
+    "path": "config.rtsp_republish_readiness_restart_attempts",
+    "value": 1
+  },
+  {
+    "path": "config.rtsp_republish_input_offset_s",
+    "value": 0
+  },
+  {
+    "path": "config.rtsp_republish_input_offset_step_s",
+    "value": 0
+  },
+  {
+    "path": "config.rtsp_republish_input_loop",
+    "value": false
+  },
+  {
+    "path": "config.rtsp_republish_h264_repeat_headers",
+    "value": false
+  },
+  {
+    "path": "config.max_send_failures",
+    "value": 0
+  },
+  {
+    "path": "config.max_exited_sources",
+    "value": 0
+  },
+  {
+    "path": "config.max_validate_seq_iq",
+    "value": 0
+  },
+  {
+    "path": "config.forwarder_null_sink",
+    "value": false
+  },
+  {
+    "path": "config.dual_shard_same_gpu",
+    "value": true
+  },
+  {
+    "path": "config.dual_shard_api",
+    "value": false
+  },
+  {
+    "path": "config.dual_shard_gpu",
+    "value": "0"
+  },
+  {
+    "path": "config.dual_shard_source_mode",
+    "value": "balanced"
+  },
+  {
+    "path": "config.evidence_shard_count",
+    "value": 4
+  },
+  {
+    "path": "config.rolling_cache_evidence",
+    "value": true
+  },
+  {
+    "path": "config.rolling_cache_enable_coverage_merge",
+    "value": false
+  },
+  {
+    "path": "config.cleanup",
+    "value": true
+  },
+  {
+    "path": "config.clear_existing_evidence",
+    "value": false
+  },
+  {
+    "path": "config.discard_pressure_results",
+    "value": false
+  },
+  {
+    "path": "config.rolling_cache_prefill_s",
+    "value": 15
+  },
+  {
+    "path": "config.rolling_cache_postfill_s",
+    "value": 0
+  },
+  {
+    "path": "config.rolling_cache_min_raw_fps",
+    "value": 0
+  },
+  {
+    "path": "config.pressure_source_visibility_timeout_s",
+    "value": 300
+  },
+  {
+    "path": "config.pressure_source_visibility_poll_s",
+    "value": 5
+  },
+  {
+    "path": "config.pressure_source_visibility_stable_samples",
+    "value": 2
+  },
+  {
+    "path": "config.pressure_source_visibility_restart_attempts",
+    "value": 1
+  },
+  {
+    "path": "config.pressure_source_ffmpeg_timeout_ms",
+    "value": 60000
+  },
+  {
+    "path": "config.pressure_source_ffmpeg_init_timeout_ms",
+    "value": 60000
+  },
+  {
+    "path": "config.pressure_source_start_stagger_s",
+    "value": 2
+  },
+  {
+    "path": "config.savant_ablation_stage",
+    "value": "full-evidence"
+  },
+  {
+    "path": "config.savant_output_mode",
+    "value": "metadata-only"
+  },
+  {
+    "path": "config.cpu_isolation_profile",
+    "value": "none"
+  },
+  {
+    "path": "config.cuda_mps",
+    "value": false
+  },
+  {
+    "path": "config.mps_savant_active_thread_percentage",
+    "value": 0
+  },
+  {
+    "path": "config.mps_adaface_active_thread_percentage",
+    "value": 0
+  },
+  {
+    "path": "config.adaface_classifier_async",
+    "value": false
+  },
+  {
+    "path": "config.face_secondary_track_id",
+    "value": false
+  },
+  {
+    "path": "config.adaface_input_queue",
+    "value": false
+  },
+  {
+    "path": "config.adaface_crop_resize",
+    "value": false
+  },
+  {
+    "path": "config.adaface_pre_gate",
+    "value": false
+  },
+  {
+    "path": "config.adaface_decoupled",
+    "value": false
+  },
+  {
+    "path": "config.max_adaface_forwarder_send_failure_ratio",
+    "value": 0.005
+  },
+  {
+    "path": "config.adaface_decoupled_sharded",
+    "value": false
+  },
+  {
+    "path": "config.adaface_roi_redis",
+    "value": true
+  },
+  {
+    "path": "config.adaface_roi_batch_timeout_ms",
+    "value": 10
+  },
+  {
+    "path": "config.media_worker_materialization_max_active",
+    "value": 4
+  },
+  {
+    "path": "config.media_worker_rolling_remux_workers",
+    "value": 2
+  },
+  {
+    "path": "config.media_worker_segment_index_io_concurrency",
+    "value": 2
+  },
+  {
+    "path": "config.media_worker_db_index_io_concurrency",
+    "value": 0
+  },
+  {
+    "path": "config.media_worker_finalizer_workers",
+    "value": 4
+  },
+  {
+    "path": "config.media_worker_finalizer_process_workers",
+    "value": 4
+  },
+  {
+    "path": "config.media_worker_finalizer_queue_capacity",
+    "value": 4
+  },
+  {
+    "path": "config.media_worker_rolling_max_per_poll",
+    "value": 4
+  },
+  {
+    "path": "config.pressure_pause_redis_rdb",
+    "value": false
+  },
+  {
+    "path": "config.pressure_tune_postgres_checkpoints",
+    "value": false
+  },
+  {
+    "path": "config.pressure_rolling_cache_host_root",
+    "value": ""
+  },
+  {
+    "path": "config.pressure_rolling_cache_materialized_host_root",
+    "value": ""
+  },
+  {
+    "path": "config.pressure_rolling_cache_retention_s",
+    "value": 0
+  },
+  {
+    "path": "config.preserve_warmup_results",
+    "value": false
+  },
+  {
+    "path": "config.pressure_sampling_start_event_ts_ms",
+    "value": 1791840858418
+  },
+  {
+    "path": "config.pressure_sampling_end_event_ts_ms",
+    "value": 1791844489666
+  },
+  {
+    "path": "config.rolling_cache_publication_workers",
+    "value": 4
+  },
+  {
+    "path": "config.rolling_cache_publication_commit_slots",
+    "value": 0
+  },
+  {
+    "path": "config.rolling_cache_publication_final_parent_group_limit",
+    "value": 1
+  },
+  {
+    "path": "config.rolling_cache_publication_file_sync_mode",
+    "value": "fsync"
+  },
+  {
+    "path": "config.rolling_cache_publication_metadata_layout",
+    "value": "split"
+  },
+  {
+    "path": "artifact_dir",
+    "value": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2"
+  },
+  {
+    "path": "steps",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "active_evidence_before",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "active_evidence_before.active_count",
+    "value": 0
+  },
+  {
+    "path": "active_evidence_before.blocking_count",
+    "value": 0
+  },
+  {
+    "path": "active_evidence_before.tasks",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_pressure",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_pressure.event_worker",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_pressure.event_worker.requested",
+    "type": "dict",
+    "count": 16
+  },
+  {
+    "path": "rolling_cache_pressure.event_worker.observed",
+    "type": "dict",
+    "count": 16
+  },
+  {
+    "path": "rolling_cache_pressure.media_worker",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_pressure.media_worker.requested",
+    "type": "dict",
+    "count": 44
+  },
+  {
+    "path": "rolling_cache_pressure.media_worker.observed",
+    "type": "dict",
+    "count": 45
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure.profiles",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure.services",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure.states",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure.states.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_stopped_before_reconfigure.states.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "clip_worker_pressure_limits",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "clip_worker_pressure_limits.container",
+    "value": "video-analytics-midterm-clip-worker"
+  },
+  {
+    "path": "clip_worker_pressure_limits.replay_shards_json_sha256",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.replay_shards_config_path",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.replay_shards_json_bytes",
+    "value": 0
+  },
+  {
+    "path": "clip_worker_pressure_limits.materialization_event_type_quotas",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_replay_shards_json_sha256",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_replay_shards_config_path",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_replay_shards_json_bytes",
+    "value": 0
+  },
+  {
+    "path": "clip_worker_pressure_limits.density_profile",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_density_profile",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_pressure_limits.materialization_pressure_level",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_materialization_pressure_level",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_materialization_event_type_quotas",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.max_jobs_per_run",
+    "value": "0"
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_max_jobs_per_run",
+    "value": "0"
+  },
+  {
+    "path": "clip_worker_pressure_limits.materialization_max_concurrency",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_materialization_max_concurrency",
+    "value": "36"
+  },
+  {
+    "path": "clip_worker_pressure_limits.observed_materialization_max_concurrency_per_shard",
+    "value": "9"
+  },
+  {
+    "path": "pressure_camera_provisioning",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "pressure_camera_provisioning.camera_slots_requested",
+    "value": 60
+  },
+  {
+    "path": "pressure_camera_provisioning.created_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_camera_provisioning.reused_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_camera_provisioning.created_camera_ids",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_camera_provisioning.reused_camera_ids",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_camera_provisioning.source_ids",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "rolling_cache_sinks_pressure",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.profiles",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.services",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.dependency_services",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.runtime_epoch_id",
+    "value": "midterm-20261012T212611Z-31a04f41"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe.uri",
+    "value": "rtsp://192.168.1.105:8554/live/1080movie"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe.status",
+    "value": "measured"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe.fps",
+    "value": 23.976023976023978
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe.rate",
+    "value": "24000/1001"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.input_fps_probe.field",
+    "value": "avg_frame_rate"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_expected_raw_fps",
+    "value": 23.976023976023978
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_retention_seconds",
+    "value": 4320
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_publication_workers",
+    "value": 4
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_publication_commit_slots",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_publication_final_parent_group_limit",
+    "value": 1
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_publication_file_sync_mode",
+    "value": "fsync"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.rolling_cache_publication_metadata_layout",
+    "value": "split"
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.observed_env",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.observed_env.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 28
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.observed_env.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 28
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.states",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.states.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.states.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.dependency_states",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.dependency_states.replay-raw-fanout-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.dependency_states.replay-raw-fanout-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.missing_dependencies",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.publication_settings_supported",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_sinks_pressure.publication_settings_skipped",
+    "value": false
+  },
+  {
+    "path": "rolling_cache_ingress_audit",
+    "type": "dict",
+    "count": 11
+  },
+  {
+    "path": "rolling_cache_ingress_audit.status",
+    "value": "passed"
+  },
+  {
+    "path": "rolling_cache_ingress_audit.ingress_mode",
+    "value": "rolling_cache_direct_raw_fanout"
+  },
+  {
+    "path": "rolling_cache_ingress_audit.expected_source_count",
+    "value": 60
+  },
+  {
+    "path": "rolling_cache_ingress_audit.observed_source_count",
+    "value": 60
+  },
+  {
+    "path": "rolling_cache_ingress_audit.endpoint_counts",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_ingress_audit.endpoint_counts.dealer+connect:tcp://replay-raw-fanout-a:5557",
+    "value": 30
+  },
+  {
+    "path": "rolling_cache_ingress_audit.endpoint_counts.dealer+connect:tcp://replay-raw-fanout-b:5557",
+    "value": 30
+  },
+  {
+    "path": "rolling_cache_ingress_audit.missing_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_ingress_audit.replay_buffered_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_ingress_audit.invalid_endpoints",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_ingress_audit.running_legacy_services",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_ingress_audit.redundant_forwarders_disabled",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-c",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-d",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-e",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-f",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-g",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.video-file-sink-h",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-c",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-d",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-e",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-f",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-g",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.replay-h",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.analysis-forwarder-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_ingress_audit.legacy_service_states.analysis-forwarder-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_source_visibility",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "pressure_source_visibility.status",
+    "value": "ready"
+  },
+  {
+    "path": "pressure_source_visibility.started_at",
+    "value": "2026-10-12T21:33:41.788883+00:00"
+  },
+  {
+    "path": "pressure_source_visibility.ready_at",
+    "value": "2026-10-12T21:33:52.110154+00:00"
+  },
+  {
+    "path": "pressure_source_visibility.timeout_s",
+    "value": 300
+  },
+  {
+    "path": "pressure_source_visibility.poll_s",
+    "value": 5
+  },
+  {
+    "path": "pressure_source_visibility.stable_samples_required",
+    "value": 2
+  },
+  {
+    "path": "pressure_source_visibility.stable_samples",
+    "value": 2
+  },
+  {
+    "path": "pressure_source_visibility.restart_attempts",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_visibility.restart_history",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot",
+    "type": "dict",
+    "count": 21
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.status",
+    "value": "all_visible"
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.expected_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.forwarder_visible_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.savant_visible_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.missing_forwarder_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.missing_savant_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.adaface_forwarder_visible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.adaface_eligible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.adaface_central_visible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.missing_adaface_forwarder_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.missing_adaface_central_eligible_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.forwarder_visible_sources",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.savant_visible_sources",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.forwarder_total_sources",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.savant_total_sources",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.forwarder_frames_seen_total",
+    "value": 129259
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.savant_frames_seen_total",
+    "value": 21610
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.savant_last_frame_age_seconds_max",
+    "value": 0.411196231842041
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.forwarder_queue_depth",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.observed_at",
+    "value": "2026-10-12T21:33:52.110122+00:00"
+  },
+  {
+    "path": "pressure_source_visibility.last_snapshot.stable_samples",
+    "value": 1
+  },
+  {
+    "path": "pressure_sampling_settle",
+    "type": "dict",
+    "count": 8
+  },
+  {
+    "path": "pressure_sampling_settle.status",
+    "value": "ready"
+  },
+  {
+    "path": "pressure_sampling_settle.started_at",
+    "value": "2026-10-12T21:34:07.126337+00:00"
+  },
+  {
+    "path": "pressure_sampling_settle.ready_at",
+    "value": "2026-10-12T21:34:17.361023+00:00"
+  },
+  {
+    "path": "pressure_sampling_settle.timeout_s",
+    "value": 300
+  },
+  {
+    "path": "pressure_sampling_settle.poll_s",
+    "value": 5
+  },
+  {
+    "path": "pressure_sampling_settle.stable_samples_required",
+    "value": 2
+  },
+  {
+    "path": "pressure_sampling_settle.stable_samples",
+    "value": 2
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot",
+    "type": "dict",
+    "count": 23
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.status",
+    "value": "all_visible"
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.expected_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.forwarder_visible_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_visible_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.missing_forwarder_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.missing_savant_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.adaface_forwarder_visible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.adaface_eligible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.adaface_central_visible_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.missing_adaface_forwarder_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.missing_adaface_central_eligible_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.forwarder_visible_sources",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_visible_sources",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.forwarder_total_sources",
+    "value": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_total_sources",
+    "value": 60
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.forwarder_frames_seen_total",
+    "value": 165620
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_frames_seen_total",
+    "value": 27913
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_last_frame_age_seconds_max",
+    "value": 0.3489518165588379
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.forwarder_queue_depth",
+    "value": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.observed_at",
+    "value": "2026-10-12T21:34:17.360994+00:00"
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.queue_depth_normalized",
+    "value": 0
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.savant_counters_advanced",
+    "value": true
+  },
+  {
+    "path": "pressure_sampling_settle.last_snapshot.stable_samples",
+    "value": 2
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.status",
+    "value": "activated"
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.activation_mode",
+    "value": "redis_dynamic_gate"
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.activated_at",
+    "value": "2026-10-12T21:34:17.362031+00:00"
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.event_not_before_ts_ms",
+    "value": 1791840857362
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.redis_key",
+    "value": "video_analytics:pressure:pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2:evidence_task_gate"
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.ttl_s",
+    "value": 6015
+  },
+  {
+    "path": "rolling_cache_evidence_after_prefill.event_worker_recreated",
+    "value": false
+  },
+  {
+    "path": "pressure_sampling_window",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_sampling_window.status",
+    "value": "completed"
+  },
+  {
+    "path": "pressure_sampling_window.duration_s",
+    "value": 3600
+  },
+  {
+    "path": "pressure_sampling_window.sample_count",
+    "value": 98
+  },
+  {
+    "path": "pressure_sampling_window.started_at",
+    "value": "2026-10-12T21:34:18.482326+00:00"
+  },
+  {
+    "path": "pressure_sampling_window.ended_at",
+    "value": "2026-10-12T22:34:49.666642+00:00"
+  },
+  {
+    "path": "pressure_sampling_cutoff",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_sampling_cutoff.status",
+    "value": "captured"
+  },
+  {
+    "path": "pressure_sampling_cutoff.created_at_cutoff",
+    "value": "2026-10-12T22:34:50.921499+00:00"
+  },
+  {
+    "path": "pressure_sampling_cutoff.event_count_at_cutoff",
+    "value": 11769
+  },
+  {
+    "path": "pressure_sampling_cutoff.max_event_ts_ms_at_cutoff",
+    "value": 1791844403733
+  },
+  {
+    "path": "pressure_sampling_cutoff.max_created_at_at_cutoff",
+    "value": "2026-10-12T22:34:50.345508+00:00"
+  },
+  {
+    "path": "rolling_cache_segment_visibility",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "rolling_cache_segment_visibility.root",
+    "value": "/data/video-analytics/media/rolling-cache"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.source_prefix",
+    "value": "pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_files_scanned",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segments_measured",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.source_count",
+    "value": 60
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.status",
+    "value": "measured"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.count",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.min",
+    "value": 72
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.p50",
+    "value": 84
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.p95",
+    "value": 95
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.p99",
+    "value": 95
+  },
+  {
+    "path": "rolling_cache_segment_visibility.frame_count.max",
+    "value": 95
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.status",
+    "value": "measured"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.count",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.min",
+    "value": 2.34
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.p50",
+    "value": 3.458
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.p95",
+    "value": 3.922
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.p99",
+    "value": 5.437
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_duration_s.max",
+    "value": 10.474
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.status",
+    "value": "measured"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.count",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.min",
+    "value": 8.497
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.p50",
+    "value": 24.297
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.p95",
+    "value": 25.033
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.p99",
+    "value": 27.722
+  },
+  {
+    "path": "rolling_cache_segment_visibility.segment_frame_rate_fps.max",
+    "value": 35.904
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.status",
+    "value": "measured"
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.count",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.min",
+    "value": 0.261
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.p50",
+    "value": 1187.41
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.p95",
+    "value": 4195.728
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.p99",
+    "value": 4764.196
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s.max",
+    "value": 4914.386
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source",
+    "type": "dict",
+    "count": 60
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_00",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_01",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_02",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_03",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_04",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_05",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_06",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_07",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_08",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_09",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_10",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_11",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_12",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_13",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_14",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_15",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_16",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_17",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_18",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_19",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_20",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_21",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_22",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_23",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_24",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_25",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_26",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_27",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_28",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_29",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_30",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_31",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_32",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_33",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_34",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_35",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_36",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_37",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_38",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_39",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_40",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_41",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_42",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_43",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_44",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_45",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_46",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_47",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_48",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_49",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_50",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_51",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_52",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_53",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_54",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_55",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_56",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_57",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_58",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_source.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_59",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_s_by_visible_at_30s",
+    "type": "list",
+    "count": 206
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_threshold_counts",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_threshold_counts.over_2s",
+    "value": 11435
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_threshold_counts.over_5s",
+    "value": 11191
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_visible_lag_threshold_counts.over_10s",
+    "value": 11133
+  },
+  {
+    "path": "rolling_cache_segment_visibility.slowest_segments",
+    "type": "list",
+    "count": 50
+  },
+  {
+    "path": "rolling_cache_segment_visibility.skipped_clock_domain",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_segment_visibility.parse_errors",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_segment_visibility.metadata_files_vanished",
+    "value": 2150
+  },
+  {
+    "path": "rolling_cache_segment_visibility.sampled_metadata_paths",
+    "type": "list",
+    "count": 20
+  },
+  {
+    "path": "rolling_cache_segment_visibility.interpretation",
+    "value": "metadata_visible_lag_s approximates segment close/index-visible lag because rolling-cache lookup scans finalized metadata.json files; it is omitted for non-epoch PTS."
+  },
+  {
+    "path": "rolling_cache_full_rate_gate",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.expected_fps",
+    "value": 23.976023976023978
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.expected_fps_source",
+    "value": "rolling_cache_raw_input"
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.min_full_rate_fps",
+    "value": 21.57842157842158
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.configured_min_raw_fps",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.min_full_rate_ratio",
+    "value": 0.9
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.observed_segment_frame_rate_p50",
+    "value": 24.297
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.segments_measured",
+    "value": 12015
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.source_count",
+    "value": 60
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.stream_count",
+    "value": 60
+  },
+  {
+    "path": "rolling_cache_full_rate_gate.full_rate_ok",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_postfill",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_postfill.status",
+    "value": "completed"
+  },
+  {
+    "path": "rolling_cache_postfill.postfill_s",
+    "value": 5
+  },
+  {
+    "path": "rolling_cache_postfill.rolling_cache_postfill_s",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_visibility_grace_s",
+    "value": 5
+  },
+  {
+    "path": "rolling_cache_postfill.started_at",
+    "value": "2026-10-12T23:17:46.645135+00:00"
+  },
+  {
+    "path": "rolling_cache_postfill.ended_at",
+    "value": "2026-10-12T23:17:51.667048+00:00"
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics.enabled",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics.reachable",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics.url",
+    "value": "http://127.0.0.1:18187/metrics"
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics.metrics",
+    "type": "dict",
+    "count": 24
+  },
+  {
+    "path": "rolling_cache_postfill.adaface_roi_metrics.batch_occupancy",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.status",
+    "value": "closed"
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.activation_mode",
+    "value": "redis_dynamic_gate"
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.event_not_before_ts_ms",
+    "value": 0
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.event_not_after_ts_ms",
+    "value": 1791847071667
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.redis_key",
+    "value": "video_analytics:pressure:pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2:evidence_task_gate"
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.ttl_s",
+    "value": 3600
+  },
+  {
+    "path": "rolling_cache_evidence_after_postfill.event_worker_recreated",
+    "value": false
+  },
+  {
+    "path": "adaface_roi_worker",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "adaface_roi_worker.enabled",
+    "value": true
+  },
+  {
+    "path": "adaface_roi_worker.reachable",
+    "value": true
+  },
+  {
+    "path": "adaface_roi_worker.url",
+    "value": "http://127.0.0.1:18187/metrics"
+  },
+  {
+    "path": "adaface_roi_worker.metrics",
+    "type": "dict",
+    "count": 24
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_messages_total{outcome=\"published\"}",
+    "value": 51019
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_stream_cleanup_total{outcome=\"deleted\"}",
+    "value": 51019
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"1\"}",
+    "value": 21939
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"2\"}",
+    "value": 8482
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"4\"}",
+    "value": 715
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"3\"}",
+    "value": 2289
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"6\"}",
+    "value": 82
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"8\"}",
+    "value": 33
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"7\"}",
+    "value": 32
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"5\"}",
+    "value": 211
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"9\"}",
+    "value": 7
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"13\"}",
+    "value": 4
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"10\"}",
+    "value": 5
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"15\"}",
+    "value": 3
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"11\"}",
+    "value": 4
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"14\"}",
+    "value": 2
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"16\"}",
+    "value": 3
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batches_total{size=\"12\"}",
+    "value": 2
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batch_size_count",
+    "value": 33813
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_batch_size_sum",
+    "value": 51019
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_inference_seconds_count",
+    "value": 33813
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_inference_seconds_sum",
+    "value": 342.24133666620037
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_pending",
+    "value": 0
+  },
+  {
+    "path": "adaface_roi_worker.metrics.va_adaface_roi_last_success_unixtime",
+    "value": 1791845557.5829911
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.max_batch_size",
+    "value": 16
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.batch_count",
+    "value": 33813
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.sample_count",
+    "value": 51019
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.mean",
+    "value": 1.5089
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.full_batches",
+    "value": 3
+  },
+  {
+    "path": "adaface_roi_worker.batch_occupancy.full_ratio",
+    "value": 0.000089
+  },
+  {
+    "path": "pressure_source_stop",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "pressure_source_stop.direct_source_container_stop",
+    "value": true
+  },
+  {
+    "path": "pressure_source_stop.reason",
+    "value": "preserve_current_runtime_epoch_until_evidence_drain"
+  },
+  {
+    "path": "pressure_source_stop.dual_shard_same_gpu",
+    "value": true
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.total",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.running",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.exited",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.restart_count_total",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.negative_pts_error_total",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.processed_zero_frames_total",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.exited_sources",
+    "type": "list",
+    "count": 20
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.restarted_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_stop.source_containers_before_stop.items",
+    "type": "list",
+    "count": 60
+  },
+  {
+    "path": "pressure_source_stop.sources_apply",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "pressure_source_stop.sources_apply.data",
+    "type": "dict",
+    "count": 21
+  },
+  {
+    "path": "pressure_source_stop.sources_apply.error",
+    "value": null
+  },
+  {
+    "path": "pressure_source_stop.sources_apply.request_id",
+    "value": "dcdc15cc-f2f4-4514-9d23-712202cf9ef7"
+  },
+  {
+    "path": "pressure_source_stop.sources_apply_error_ignored",
+    "value": false
+  },
+  {
+    "path": "pressure_source_stop.source_logs",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_source_stop.source_logs.container_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_stop.source_logs.captured_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_source_stop.source_logs.timed_out_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.source_logs.artifact_dir",
+    "value": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/source_adapter_logs"
+  },
+  {
+    "path": "pressure_source_stop.source_logs.logs",
+    "type": "list",
+    "count": 20
+  },
+  {
+    "path": "pressure_source_stop.removed_source_containers",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_source_stop.stable_source_container_removal",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "pressure_source_stop.stable_source_container_removal.checks",
+    "value": 3
+  },
+  {
+    "path": "pressure_source_stop.stable_source_container_removal.stable",
+    "value": true
+  },
+  {
+    "path": "pressure_source_stop.stable_source_container_removal.removed_count",
+    "value": 0
+  },
+  {
+    "path": "pressure_source_stop.stable_source_container_removal.removed",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_event_quiescence",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_event_quiescence.status",
+    "value": "quiesced"
+  },
+  {
+    "path": "pressure_event_quiescence.timeout_s",
+    "value": 660
+  },
+  {
+    "path": "pressure_event_quiescence.stable_samples",
+    "value": 2
+  },
+  {
+    "path": "pressure_event_quiescence.stable_samples_required",
+    "value": 2
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.observed_at",
+    "value": "2026-10-12T23:20:04.275546+00:00"
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.stable_samples",
+    "value": 2
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.stable_samples_required",
+    "value": 2
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.source_containers",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.db_ingest",
+    "type": "dict",
+    "count": 13
+  },
+  {
+    "path": "pressure_event_quiescence.last_snapshot.redis_ingest",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop.containers",
+    "type": "list",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop.after",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop.after.rolling-cache-sink",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop.after.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_flush_after_source_stop.after.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "pressure_post_sample_cleanup",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "pressure_post_sample_cleanup.status",
+    "value": "skipped"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.reason",
+    "value": "keep_all_evidence_and_trajectory_rows"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.event_rows_deleted",
+    "value": 0
+  },
+  {
+    "path": "pressure_post_sample_cleanup.face_observation_rows_deleted",
+    "value": 0
+  },
+  {
+    "path": "pressure_post_sample_cleanup.person_observation_rows_deleted",
+    "value": 0
+  },
+  {
+    "path": "pressure_post_sample_cleanup.evidence_dirs_removed",
+    "value": 0
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest",
+    "type": "dict",
+    "count": 13
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.events",
+    "value": 12023
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.new_events",
+    "value": 4182
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.suppressed_events",
+    "value": 7841
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.source_count",
+    "value": 60
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.min_event_ts_ms",
+    "value": 1791840872755
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.max_event_ts_ms",
+    "value": 1791844474805
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.event_ts_span_s",
+    "value": "3602.0500000000000000"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.min_created_at",
+    "value": "2026-10-12 21:34:33.228985+00:00"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.max_created_at",
+    "value": "2026-10-12 22:35:59.234440+00:00"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.created_at_span_s",
+    "value": "3686.005455"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.max_created_minus_event_ts_s",
+    "value": "128.631544"
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.formal_sampling_window",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "pressure_post_sample_cleanup.post_cleanup_db_ingest.cooldown_algorithm_60s",
+    "type": "dict",
+    "count": 11
+  },
+  {
+    "path": "diagnostics",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "diagnostics.sample_summary",
+    "type": "dict",
+    "count": 57
+  },
+  {
+    "path": "diagnostics.sample_summary.sample_count",
+    "value": 98
+  },
+  {
+    "path": "diagnostics.sample_summary.max_queue_depth",
+    "value": 16384
+  },
+  {
+    "path": "diagnostics.sample_summary.max_forwarder_queue_depth",
+    "value": 16384
+  },
+  {
+    "path": "diagnostics.sample_summary.max_forwarder_queue_depth_instantaneous",
+    "value": 16384
+  },
+  {
+    "path": "diagnostics.sample_summary.queue_full_samples",
+    "value": 84
+  },
+  {
+    "path": "diagnostics.sample_summary.transient_forwarder_queue_samples",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_savant_send_failures_total",
+    "value": 47
+  },
+  {
+    "path": "diagnostics.sample_summary.baseline_savant_send_failures_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_savant_send_failures_delta",
+    "value": 47
+  },
+  {
+    "path": "diagnostics.sample_summary.max_forwarder_sources",
+    "value": 60
+  },
+  {
+    "path": "diagnostics.sample_summary.max_savant_sources",
+    "value": 60
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_central_sources",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_forwarder_sources",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_forwarder_eligible_sources",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_central_missing_eligible_sources",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_forwarder_queue_depth",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_raw_forwarder_queue_depth",
+    "value": 16
+  },
+  {
+    "path": "diagnostics.sample_summary.max_raw_forwarder_frames_dropped_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_raw_forwarder_send_failures_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_raw_forwarder_frames_forwarded_total",
+    "value": 5369668
+  },
+  {
+    "path": "diagnostics.sample_summary.final_forwarder_frames_seen_total",
+    "value": 5369600
+  },
+  {
+    "path": "diagnostics.sample_summary.final_forwarder_frames_forwarded_total",
+    "value": 873000
+  },
+  {
+    "path": "diagnostics.sample_summary.final_forwarder_frames_dropped_total",
+    "value": 4481194
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_frames_seen_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_frames_forwarded_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_metadata_filtered_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_send_failures_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_send_attempts_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_forwarder_send_failure_ratio",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_forwarder_send_failure_ratio",
+    "value": 0.005
+  },
+  {
+    "path": "diagnostics.sample_summary.final_adaface_central_missing_eligible_source_ids",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.postfill_adaface_visibility",
+    "type": "dict",
+    "count": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_pose_objects_total",
+    "value": 659013
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_face_objects_total",
+    "value": 836567
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_adaface_embeddings_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_person_observations_exported_total",
+    "value": 659013
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_face_observations_exported_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.final_savant_stage_metrics",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_effective_fps_sample_count",
+    "value": 97
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_effective_fps_method",
+    "value": "savant_frames_seen_counter_delta"
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_window_effective_fps_mean",
+    "value": 4.1032
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_counter_effective_fps",
+    "value": 3.8769
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_effective_fps_mean",
+    "value": 3.8769
+  },
+  {
+    "path": "diagnostics.sample_summary.minimum_effective_fps",
+    "value": 3.96
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_effective_fps_meets_minimum",
+    "value": false
+  },
+  {
+    "path": "diagnostics.sample_summary.steady_effective_fps_target_ratio",
+    "value": 0.9692
+  },
+  {
+    "path": "diagnostics.sample_summary.final_forwarder_forwarded_seen_ratio",
+    "value": 0.1626
+  },
+  {
+    "path": "diagnostics.sample_summary.target_forwarded_frames",
+    "value": 864000
+  },
+  {
+    "path": "diagnostics.sample_summary.final_forwarded_target_ratio",
+    "value": 1.0104
+  },
+  {
+    "path": "diagnostics.sample_summary.max_forwarder_cpu_percent",
+    "value": 95.72
+  },
+  {
+    "path": "diagnostics.sample_summary.max_savant_cpu_percent",
+    "value": 322.94
+  },
+  {
+    "path": "diagnostics.sample_summary.max_adaface_central_cpu_percent",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.sample_summary.max_source_adapter_cpu_percent",
+    "value": 12.58
+  },
+  {
+    "path": "diagnostics.sample_summary.max_worker_cpu_percent",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "diagnostics.sample_summary.stable_samples",
+    "value": 10
+  },
+  {
+    "path": "diagnostics.sample_summary.redis_consumer_lag",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "diagnostics.sample_summary.samples",
+    "type": "list",
+    "count": 98
+  },
+  {
+    "path": "diagnostics.source_containers",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "diagnostics.source_containers.total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.running",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.exited",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.restart_count_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.negative_pts_error_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.processed_zero_frames_total",
+    "value": 0
+  },
+  {
+    "path": "diagnostics.source_containers.exited_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "diagnostics.source_containers.restarted_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "diagnostics.source_containers.items",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "diagnostics.rtsp_republishers",
+    "type": "dict",
+    "count": 1
+  },
+  {
+    "path": "diagnostics.rtsp_republishers.enabled",
+    "value": false
+  },
+  {
+    "path": "diagnostics.log_summary",
+    "type": "dict",
+    "count": 15
+  },
+  {
+    "path": "diagnostics.log_summary.savant",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.analysis_forwarder",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.media_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.clip_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.event_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.person_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.face_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.adaface_central",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.adaface_forwarder",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.adaface_roi_worker",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.replay_raw_fanout",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.rolling_cache_sink",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.rolling_cache_sink_a",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.rolling_cache_sink_b",
+    "type": "dict",
+    "count": 360
+  },
+  {
+    "path": "diagnostics.log_summary.video_file_sink",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "diagnostics.cuda_mps",
+    "type": "dict",
+    "count": 1
+  },
+  {
+    "path": "diagnostics.cuda_mps.enabled",
+    "value": false
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker.enabled",
+    "value": true
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker.reachable",
+    "value": true
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker.url",
+    "value": "http://127.0.0.1:18187/metrics"
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker.metrics",
+    "type": "dict",
+    "count": 24
+  },
+  {
+    "path": "diagnostics.adaface_roi_worker.batch_occupancy",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "kept_evidence_count",
+    "value": 1603
+  },
+  {
+    "path": "kept_evidence",
+    "type": "list",
+    "count": 1603
+  },
+  {
+    "path": "person_trajectory_completeness",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "person_trajectory_completeness.status",
+    "value": "passed"
+  },
+  {
+    "path": "person_trajectory_completeness.producer",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "person_trajectory_completeness.producer.exported_by_container",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "person_trajectory_completeness.producer.exported_total",
+    "value": 497484
+  },
+  {
+    "path": "person_trajectory_completeness.producer.exporter_drop_count",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.producer.writer_drop_log_count",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.producer.writer_error_count",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.postgresql",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "person_trajectory_completeness.postgresql.persisted",
+    "value": 497487
+  },
+  {
+    "path": "person_trajectory_completeness.postgresql.source_count",
+    "value": 60
+  },
+  {
+    "path": "person_trajectory_completeness.postgresql.expected_source_count",
+    "value": 60
+  },
+  {
+    "path": "person_trajectory_completeness.loss_count",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.persisted_ratio",
+    "value": 1
+  },
+  {
+    "path": "person_trajectory_completeness.minimum_persisted_ratio",
+    "value": 0.995
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.group",
+    "value": "person-observation-workers-midterm"
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.max_lag",
+    "value": 6
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.max_pending",
+    "value": 6
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.final_lag",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.final_pending",
+    "value": 0
+  },
+  {
+    "path": "person_trajectory_completeness.sampling_window_consumer_lag.measured_samples",
+    "value": 98
+  },
+  {
+    "path": "db_summary_before_cleanup",
+    "type": "dict",
+    "count": 28
+  },
+  {
+    "path": "db_summary_before_cleanup.cameras",
+    "value": 60
+  },
+  {
+    "path": "db_summary_before_cleanup.events",
+    "value": 12023
+  },
+  {
+    "path": "db_summary_before_cleanup.suppressed_events",
+    "value": 7841
+  },
+  {
+    "path": "db_summary_before_cleanup.unsuppressed_events",
+    "value": 4182
+  },
+  {
+    "path": "db_summary_before_cleanup.tasks",
+    "value": 4182
+  },
+  {
+    "path": "db_summary_before_cleanup.bundles",
+    "value": 1316
+  },
+  {
+    "path": "db_summary_before_cleanup.playable_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_before_cleanup.behavior_video_playable_bundles",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.face_image_ready_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_before_cleanup.watchlist_image_ready_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_before_cleanup.covered_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.covered_playable_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.active_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.ready_waiting_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.unready_waiting_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.distinct_events_with_playable_evidence",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_before_cleanup.distinct_events_without_playable_evidence",
+    "value": 10718
+  },
+  {
+    "path": "db_summary_before_cleanup.covered_but_not_playable_distinct_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.distinct_events_with_terminal_nonplayable_outcome",
+    "value": 10718
+  },
+  {
+    "path": "db_summary_before_cleanup.blocking_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.expired_without_attempt_tasks",
+    "value": 1235
+  },
+  {
+    "path": "db_summary_before_cleanup.active_materialization_leases",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.finalizer_pending_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.finalizer_pending_unleased_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.finalizer_pending_leased_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_before_cleanup.task_statuses",
+    "type": "list",
+    "count": 3
+  },
+  {
+    "path": "db_summary_before_cleanup.event_types",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "db_summary_before_cleanup.adaface_roi",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "db_summary_before_cleanup.adaface_roi.observations",
+    "value": 50068
+  },
+  {
+    "path": "db_summary_before_cleanup.adaface_roi.source_count",
+    "value": 60
+  },
+  {
+    "path": "db_summary_before_cleanup.adaface_roi.embedding_norm_min",
+    "value": 0.9993724434493587
+  },
+  {
+    "path": "db_summary_before_cleanup.adaface_roi.embedding_norm_max",
+    "value": 1.000645627406616
+  },
+  {
+    "path": "non_materialized_task_details",
+    "type": "list",
+    "count": 2877
+  },
+  {
+    "path": "evidence_window_validation",
+    "type": "dict",
+    "count": 13
+  },
+  {
+    "path": "evidence_window_validation.status",
+    "value": "passed"
+  },
+  {
+    "path": "evidence_window_validation.video_count",
+    "value": 6
+  },
+  {
+    "path": "evidence_window_validation.allowed_windows",
+    "type": "list",
+    "count": 6
+  },
+  {
+    "path": "evidence_window_validation.duration_tolerance_s",
+    "value": 1.25
+  },
+  {
+    "path": "evidence_window_validation.minimum_raw_clip_fps",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.by_window",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "evidence_window_validation.by_window.2:2",
+    "value": 1
+  },
+  {
+    "path": "evidence_window_validation.by_window.3:3",
+    "value": 1
+  },
+  {
+    "path": "evidence_window_validation.by_window.5:5",
+    "value": 1
+  },
+  {
+    "path": "evidence_window_validation.by_window.8:8",
+    "value": 3
+  },
+  {
+    "path": "evidence_window_validation.failures",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "evidence_window_validation.failures.unexpected_window_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.failures.duration_mismatch_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.failures.missing_policy_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.failures.missing_duration_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.failures.frame_rate_mismatch_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.failures.missing_frame_rate_count",
+    "value": 0
+  },
+  {
+    "path": "evidence_window_validation.unexpected_windows",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "evidence_window_validation.duration_mismatches",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "evidence_window_validation.missing_policy",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "evidence_window_validation.missing_duration",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "evidence_window_validation.frame_rate_mismatches",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "evidence_window_validation.missing_frame_rate",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability",
+    "type": "dict",
+    "count": 14
+  },
+  {
+    "path": "downstream_observability.schema_version",
+    "value": 7
+  },
+  {
+    "path": "downstream_observability.created_at",
+    "value": "2026-10-12T23:54:43.879160+00:00"
+  },
+  {
+    "path": "downstream_observability.redis",
+    "type": "dict",
+    "count": 1
+  },
+  {
+    "path": "downstream_observability.redis.streams",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "downstream_observability.postgresql",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.postgresql.run_summary",
+    "type": "dict",
+    "count": 28
+  },
+  {
+    "path": "downstream_observability.postgresql.event_task_ingest_latency_seconds",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.postgresql.table_stats",
+    "type": "list",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.postgresql.evidence_task_lifecycle_seconds",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.postgresql.rolling_cache_ready_schedule_seconds",
+    "type": "dict",
+    "count": 27
+  },
+  {
+    "path": "downstream_observability.qdrant",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.qdrant.query_latency_ms",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.qdrant.exact_rerank_latency_ms",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.qdrant.fallback_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.qdrant.shadow_mismatch_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.qdrant.outbox",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "downstream_observability.event_worker",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.event_worker.record_request_dedupe",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "downstream_observability.event_worker.cpu_percent",
+    "value": 14.74
+  },
+  {
+    "path": "downstream_observability.face_worker",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "downstream_observability.face_worker.watchlist_hit_emitted_count",
+    "value": 2098
+  },
+  {
+    "path": "downstream_observability.face_worker.watchlist_emit_failed_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.face_worker.gallery_query_completed_count",
+    "value": 51019
+  },
+  {
+    "path": "downstream_observability.face_worker.gallery_query_failed_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.face_worker.gallery_query_latency_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.face_worker.cpu_percent",
+    "value": 85.35
+  },
+  {
+    "path": "downstream_observability.media_worker",
+    "type": "dict",
+    "count": 45
+  },
+  {
+    "path": "downstream_observability.media_worker.finalized_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.media_worker.deferred_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.paced_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.throttle_paced_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.throttle_deadline_guard_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.throttle_disabled_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.media_worker.finalizer_failed_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.claim_busy_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.claim_terminal_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.duplicate_materialization_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.finalizer_worker_counts",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "downstream_observability.media_worker.finalizer_worker_count",
+    "value": 4
+  },
+  {
+    "path": "downstream_observability.media_worker.imageio_ffmpeg_fallback_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.media_worker.claim_wait_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.queue_wait_ms_by_source",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "downstream_observability.media_worker.queue_wait_ms_by_shard",
+    "type": "dict",
+    "count": 1
+  },
+  {
+    "path": "downstream_observability.media_worker.throttle_sleep_s",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.deadline_slack_s",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.media_worker.finalization_duration_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.queue_wait_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.lifecycle_elapsed_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.post_savant_finalization_elapsed_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.ffprobe_duration_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.ffmpeg_duration_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.replay_to_sink_metadata_ms",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.media_worker.sink_metadata_to_video_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.sink_video_to_stable_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.sink_stable_to_ffprobe_ready_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.sink_ffprobe_ready_to_finalizer_start_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.finalizer_pool_wait_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.finalizer_lane",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "downstream_observability.media_worker.ready_to_remux_claim_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_exec_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_total_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_metadata_publish_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_metadata_bytes",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_metadata_reload_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_handoff_build_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.remux_unattributed_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.segment_index_job",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "downstream_observability.media_worker.handoff_to_finalizer_admission_ms",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.db_index",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.media_worker.scheduler",
+    "type": "dict",
+    "count": 15
+  },
+  {
+    "path": "downstream_observability.media_worker.cpu_percent",
+    "value": 110.6
+  },
+  {
+    "path": "downstream_observability.evidence_types",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.evidence_types.schema_version",
+    "value": "evidence-type-counts-v1"
+  },
+  {
+    "path": "downstream_observability.evidence_types.behavior_video",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.evidence_types.watchlist_image",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.evidence_types.other_image_ready_bundle_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_types.playable_or_ready_total",
+    "value": 1305
+  },
+  {
+    "path": "downstream_observability.phase_latency_ms",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.phase_latency_ms.clip_worker",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "downstream_observability.phase_latency_ms.media_worker",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "downstream_observability.replay_admission",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "downstream_observability.replay_admission.slot_acquired_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.replay_admission.slot_acquire_success_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.replay_admission.slot_released_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.replay_admission.slot_release_reasons",
+    "type": "dict",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability.replay_admission.duration_seconds_effective",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.replay_admission.timeout_budget_s",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.replay_admission.release_sink_video_to_stable_ms",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.replay_topology",
+    "type": "dict",
+    "count": 6
+  },
+  {
+    "path": "downstream_observability.replay_topology.replay_topology",
+    "value": "single_sink"
+  },
+  {
+    "path": "downstream_observability.replay_topology.dual_replay_enabled",
+    "value": false
+  },
+  {
+    "path": "downstream_observability.replay_topology.reason",
+    "value": "REPLAY_SHARDS_CONFIG_PATH empty or replay/video-file-sink shard containers stopped"
+  },
+  {
+    "path": "downstream_observability.replay_topology.reason_details",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.replay_topology.clip_worker",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "downstream_observability.replay_topology.containers",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "downstream_observability.video_file_sink",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "downstream_observability.video_file_sink.instances",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "downstream_observability.video_file_sink.aggregate",
+    "type": "dict",
+    "count": 8
+  },
+  {
+    "path": "downstream_observability.evidence_8090",
+    "type": "dict",
+    "count": 20
+  },
+  {
+    "path": "downstream_observability.evidence_8090.retained_count",
+    "value": 1603
+  },
+  {
+    "path": "downstream_observability.evidence_8090.checked_count",
+    "value": 1603
+  },
+  {
+    "path": "downstream_observability.evidence_8090.ok_count",
+    "value": 1603
+  },
+  {
+    "path": "downstream_observability.evidence_8090.timeline_checked_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.evidence_8090.timeline_ok_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.evidence_8090.timeline_missing_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.timeline_fallback_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_checked_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_ok_count",
+    "value": 6
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_skipped_zero_expected_count",
+    "value": 1597
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_fallback_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_bbox_missing_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_person_context_missing_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_count_mismatch_count",
+    "value": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.failed",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.timeline_failed",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_failed",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.annotation_count_mismatches",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "downstream_observability.evidence_8090.health",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "downstream_observability.evidence_8090.status",
+    "value": "measured"
+  },
+  {
+    "path": "failure_reasons",
+    "type": "list",
+    "count": 8
+  },
+  {
+    "path": "warnings",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "cleanup",
+    "type": "dict",
+    "count": 13
+  },
+  {
+    "path": "cleanup.disabled_cameras",
+    "value": 60
+  },
+  {
+    "path": "cleanup.deleted_rules",
+    "value": 0
+  },
+  {
+    "path": "cleanup.deleted_zones",
+    "value": 0
+  },
+  {
+    "path": "cleanup.deleted_cameras",
+    "value": 0
+  },
+  {
+    "path": "cleanup.deleted_events",
+    "value": 0
+  },
+  {
+    "path": "cleanup.deleted_face_observations",
+    "value": 0
+  },
+  {
+    "path": "cleanup.deleted_person_bbox_observations",
+    "value": 0
+  },
+  {
+    "path": "cleanup.removed_evidence_paths",
+    "value": 0
+  },
+  {
+    "path": "cleanup.visual_results_retained",
+    "value": true
+  },
+  {
+    "path": "cleanup.runtime_sources_apply_after_camera_cleanup",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "cleanup.runtime_sources_apply_after_camera_cleanup.data",
+    "type": "dict",
+    "count": 21
+  },
+  {
+    "path": "cleanup.runtime_sources_apply_after_camera_cleanup.error",
+    "value": null
+  },
+  {
+    "path": "cleanup.runtime_sources_apply_after_camera_cleanup.request_id",
+    "value": "5df9c7d2-195e-42f7-9128-ce5b655fedc9"
+  },
+  {
+    "path": "cleanup.redis_deleted",
+    "type": "dict",
+    "count": 69
+  },
+  {
+    "path": "cleanup.redis_deleted.security.events",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.face_observations",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.person_observations",
+    "value": 100001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations",
+    "value": 200000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.record_requests",
+    "value": 0
+  },
+  {
+    "path": "cleanup.redis_deleted.security.alerts",
+    "value": 5338
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_08",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_00",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_12",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_46",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_04",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_02",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_36",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_49",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_40",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_47",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_18",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_42",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_15",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_01",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_23",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_27",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_21",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_52",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_26",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_22",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_56",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_45",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_51",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_06",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_17",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_43",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_07",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_16",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_31",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_32",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_20",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_14",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_50",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_11",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_10",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_55",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_13",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_29",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_25",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_59",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_19",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_53",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_34",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_03",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_28",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_38",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_37",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_57",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_33",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_58",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_05",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_44",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_41",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_48",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_54",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_39",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_35",
+    "value": 10001
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_24",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_30",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2_09",
+    "value": 10000
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.source_streams_deleted",
+    "value": 60
+  },
+  {
+    "path": "cleanup.redis_deleted.security.frame_annotations.source_stream_entries_deleted",
+    "value": 600029
+  },
+  {
+    "path": "cleanup.redis_deleted.security.face_rois.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+    "value": 0
+  },
+  {
+    "path": "cleanup.removed_source_containers",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "cleanup.removed_rolling_cache",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "cleanup.removed_rolling_cache.source_dirs",
+    "value": 127
+  },
+  {
+    "path": "cleanup.removed_rolling_cache.materialized_dirs",
+    "value": 0
+  },
+  {
+    "path": "evidence_task_gate_cleanup",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "evidence_task_gate_cleanup.status",
+    "value": "cleared"
+  },
+  {
+    "path": "evidence_task_gate_cleanup.redis_key",
+    "value": "video_analytics:pressure:pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2:evidence_task_gate"
+  },
+  {
+    "path": "evidence_task_gate_cleanup.deleted",
+    "value": 1
+  },
+  {
+    "path": "clip_worker_replay_shards_restore",
+    "type": "dict",
+    "count": 18
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.container",
+    "value": "video-analytics-midterm-clip-worker"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.replay_shards_json_sha256",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.replay_shards_config_path",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.replay_shards_json_bytes",
+    "value": 0
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.materialization_event_type_quotas",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_replay_shards_json_sha256",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_replay_shards_config_path",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_replay_shards_json_bytes",
+    "value": 0
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.density_profile",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_density_profile",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.materialization_pressure_level",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_materialization_pressure_level",
+    "value": "high_density"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_materialization_event_type_quotas",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.max_jobs_per_run",
+    "value": "0"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_max_jobs_per_run",
+    "value": "0"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.materialization_max_concurrency",
+    "value": ""
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_materialization_max_concurrency",
+    "value": "36"
+  },
+  {
+    "path": "clip_worker_replay_shards_restore.observed_materialization_max_concurrency_per_shard",
+    "value": "9"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested",
+    "type": "dict",
+    "count": 16
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.RECORDING_COOLDOWN_SECONDS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.RECORDING_COOLDOWN_SCOPE",
+    "value": "algorithm"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS",
+    "value": "true"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_DENSITY_PROFILE",
+    "value": "high_density"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+    "value": "9"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED",
+    "value": "false"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS",
+    "value": "60"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
+    "value": "intrusion,watchlist_hit,live_search_hit"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS",
+    "value": "30"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_TASK_CREATION_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.requested.EVIDENCE_TASK_GATE_REDIS_KEY",
+    "value": "video_analytics:pressure:pressure60_allalg_rr157_uos157_1h_fixed_20261013:evidence_task_gate"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed",
+    "type": "dict",
+    "count": 16
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.RECORDING_COOLDOWN_SECONDS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.RECORDING_COOLDOWN_SCOPE",
+    "value": "algorithm"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS",
+    "value": "true"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_DENSITY_PROFILE",
+    "value": "high_density"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+    "value": "9"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED",
+    "value": "false"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS",
+    "value": "60"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
+    "value": "intrusion,watchlist_hit,live_search_hit"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS",
+    "value": "30"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_TASK_CREATION_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS",
+    "value": "0"
+  },
+  {
+    "path": "event_worker_evidence_admission_restore.observed.EVIDENCE_TASK_GATE_REDIS_KEY",
+    "value": "video_analytics:pressure:pressure60_allalg_rr157_uos157_1h_fixed_20261013:evidence_task_gate"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested",
+    "type": "dict",
+    "count": 45
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_FFMPEG_X264_PRESET",
+    "value": "ultrafast"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_IMAGE_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_IMAGE_QUEUE_CAPACITY",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_REMUX_QUEUE_CAPACITY",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_FINALIZER_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_FINALIZER_PROCESS_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SCHEDULER_V2_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_COMPLETION_WAKE_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_DB_POOL_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY",
+    "value": "0"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SEGMENT_INDEX_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
+    "value": "60"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+    "value": "2048"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
+    "value": "268435456"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
+    "value": "2"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_SOURCES",
+    "value": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_00,pressure60_allalg_rr157_uos157_1h_fixed_20261013_01,pressure60_allalg_rr157_uos157_1h_fixed_20261013_02,pressure60_allalg_rr157_uos157_1h_fixed_20261013_03,pressure60_allalg_rr157_uos157_1h_fixed_20261013_04,pressure60_allalg_rr157_uos157_1h_fixed_20261013_05,pressure60_allalg_rr157_uos157_1h_fixed_20261013_06,pressure60_allalg_rr157_uos157_1h_fixed_20261013_07,pressure60_allalg_rr157_uos157_1h_fixed_20261013_08,pressure60_allalg_rr157_uos157_1h_fixed_20261013_09,pressure60_allalg_rr157_uos157_1h_fixed_20261013_10,pressure60_allalg_rr157_uos157_1h_fixed_20261013_11,pressure60_allalg_rr157_uos157_1h_fixed_20261013_12,pressure60_allalg_rr157_uos157_1h_fixed_20261013_13,pressure60_allalg_rr157_uos157_1h_fixed_20261013_14,pressure60_allalg_rr157_uos157_1h_fixed_20261013_15,pressure60_allalg_rr157_uos157_1h_fixed_20261013_16,pressure60_allalg_rr157_uos157_1h_fixed_20261013_17,pressure60_allalg_rr157_uos157_1h_fixed_20261013_18,pressure60_allalg_rr157_uos157_1h_fixed_20261013_19,pressure60_allalg_rr157_uos157_1h_fixed_20261013_20,pressure60_allalg_rr157_uos157_1h_fixed_20261013_21,pressure60_allalg_rr157_uos157_1h_fixed_20261013_22,pressure60_allalg_rr157_uos157_1h_fixed_20261013_23,pressure60_allalg_rr157_uos157_1h_fixed_20261013_24,pressure60_allalg_rr157_uos157_1h_fixed_20261013_25,pressure60_allalg_rr157_uos157_1h_fixed_20261013_26,pressure60_allalg_rr157_uos157_1h_fixed_20261013_27,pressure60_allalg_rr157_uos157_1h_fixed_20261013_28,pressure60_allalg_rr157_uos157_1h_fixed_20261013_29,pressure60_allalg_rr157_uos157_1h_fixed_20261013_30,pressure60_allalg_rr157_uos157_1h_fixed_20261013_31,pressure60_allalg_rr157_uos157_1h_fixed_20261013_32,pressure60_allalg_rr157_uos157_1h_fixed_20261013_33,pressure60_allalg_rr157_uos157_1h_fixed_20261013_34,pressure60_allalg_rr157_uos157_1h_fixed_20261013_35,pressure60_allalg_rr157_uos157_1h_fixed_20261013_36,pressure60_allalg_rr157_uos157_1h_fixed_20261013_37,pressure60_allalg_rr157_uos157_1h_fixed_20261013_38,pressure60_allalg_rr157_uos157_1h_fixed_20261013_39,pressure60_allalg_rr157_uos157_1h_fixed_20261013_40,pressure60_allalg_rr157_uos157_1h_fixed_20261013_41,pressure60_allalg_rr157_uos157_1h_fixed_20261013_42,pressure60_allalg_rr157_uos157_1h_fixed_20261013_43,pressure60_allalg_rr157_uos157_1h_fixed_20261013_44,pressure60_allalg_rr157_uos157_1h_fixed_20261013_45,pressure60_allalg_rr157_uos157_1h_fixed_20261013_46,pressure60_allalg_rr157_uos157_1h_fixed_20261013_47,pressure60_allalg_rr157_uos157_1h_fixed_20261013_48,pressure60_allalg_rr157_uos157_1h_fixed_20261013_49,pressure60_allalg_rr157_uos157_1h_fixed_20261013_50,pressure60_allalg_rr157_uos157_1h_fixed_20261013_51,pressure60_allalg_rr157_uos157_1h_fixed_20261013_52,pressure60_allalg_rr157_uos157_1h_fixed_20261013_53,pressure60_allalg_rr157_uos157_1h_fixed_20261013_54,pressure60_allalg_rr157_uos157_1h_fixed_20261013_55,pressure60_allalg_rr157_uos157_1h_fixed_20261013_56,pressure60_allalg_rr157_uos157_1h_fixed_20261013_57,pressure60_allalg_rr157_uos157_1h_fixed_20261013_58,pressure60_allalg_rr157_uos157_1h_fixed_20261013_59"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_ROOT",
+    "value": "/media/rolling-cache"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZED_ROOT",
+    "value": "/media/rolling-cache-materialized"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_RETENTION_SECONDS",
+    "value": "4020"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_SEGMENT_SECONDS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_FALLBACK_TO_REPLAY",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_CANDIDATE_LOOKAHEAD",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_AGING_SECONDS",
+    "value": "60"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_WORKERS",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+    "value": "9"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS",
+    "value": "120"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.EVIDENCE_DENSITY_PROFILE",
+    "value": "high_density"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.POST_SAVANT_FAST_RAW_CLIP_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS",
+    "value": "10000"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S",
+    "value": "900"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES",
+    "value": "64"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_MAX_SCAN",
+    "value": "500"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT",
+    "value": "500"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",
+    "value": "2400"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.requested.EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed",
+    "type": "dict",
+    "count": 45
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_FFMPEG_X264_PRESET",
+    "value": "ultrafast"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_IMAGE_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_IMAGE_QUEUE_CAPACITY",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_REMUX_QUEUE_CAPACITY",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_FINALIZER_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_FINALIZER_PROCESS_WORKERS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SCHEDULER_V2_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_COMPLETION_WAKE_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_DB_POOL_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY",
+    "value": "0"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SEGMENT_INDEX_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
+    "value": "60"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+    "value": "2048"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
+    "value": "268435456"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
+    "value": "2"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_SOURCES",
+    "value": "pressure60_allalg_rr157_uos157_1h_fixed_20261013_00,pressure60_allalg_rr157_uos157_1h_fixed_20261013_01,pressure60_allalg_rr157_uos157_1h_fixed_20261013_02,pressure60_allalg_rr157_uos157_1h_fixed_20261013_03,pressure60_allalg_rr157_uos157_1h_fixed_20261013_04,pressure60_allalg_rr157_uos157_1h_fixed_20261013_05,pressure60_allalg_rr157_uos157_1h_fixed_20261013_06,pressure60_allalg_rr157_uos157_1h_fixed_20261013_07,pressure60_allalg_rr157_uos157_1h_fixed_20261013_08,pressure60_allalg_rr157_uos157_1h_fixed_20261013_09,pressure60_allalg_rr157_uos157_1h_fixed_20261013_10,pressure60_allalg_rr157_uos157_1h_fixed_20261013_11,pressure60_allalg_rr157_uos157_1h_fixed_20261013_12,pressure60_allalg_rr157_uos157_1h_fixed_20261013_13,pressure60_allalg_rr157_uos157_1h_fixed_20261013_14,pressure60_allalg_rr157_uos157_1h_fixed_20261013_15,pressure60_allalg_rr157_uos157_1h_fixed_20261013_16,pressure60_allalg_rr157_uos157_1h_fixed_20261013_17,pressure60_allalg_rr157_uos157_1h_fixed_20261013_18,pressure60_allalg_rr157_uos157_1h_fixed_20261013_19,pressure60_allalg_rr157_uos157_1h_fixed_20261013_20,pressure60_allalg_rr157_uos157_1h_fixed_20261013_21,pressure60_allalg_rr157_uos157_1h_fixed_20261013_22,pressure60_allalg_rr157_uos157_1h_fixed_20261013_23,pressure60_allalg_rr157_uos157_1h_fixed_20261013_24,pressure60_allalg_rr157_uos157_1h_fixed_20261013_25,pressure60_allalg_rr157_uos157_1h_fixed_20261013_26,pressure60_allalg_rr157_uos157_1h_fixed_20261013_27,pressure60_allalg_rr157_uos157_1h_fixed_20261013_28,pressure60_allalg_rr157_uos157_1h_fixed_20261013_29,pressure60_allalg_rr157_uos157_1h_fixed_20261013_30,pressure60_allalg_rr157_uos157_1h_fixed_20261013_31,pressure60_allalg_rr157_uos157_1h_fixed_20261013_32,pressure60_allalg_rr157_uos157_1h_fixed_20261013_33,pressure60_allalg_rr157_uos157_1h_fixed_20261013_34,pressure60_allalg_rr157_uos157_1h_fixed_20261013_35,pressure60_allalg_rr157_uos157_1h_fixed_20261013_36,pressure60_allalg_rr157_uos157_1h_fixed_20261013_37,pressure60_allalg_rr157_uos157_1h_fixed_20261013_38,pressure60_allalg_rr157_uos157_1h_fixed_20261013_39,pressure60_allalg_rr157_uos157_1h_fixed_20261013_40,pressure60_allalg_rr157_uos157_1h_fixed_20261013_41,pressure60_allalg_rr157_uos157_1h_fixed_20261013_42,pressure60_allalg_rr157_uos157_1h_fixed_20261013_43,pressure60_allalg_rr157_uos157_1h_fixed_20261013_44,pressure60_allalg_rr157_uos157_1h_fixed_20261013_45,pressure60_allalg_rr157_uos157_1h_fixed_20261013_46,pressure60_allalg_rr157_uos157_1h_fixed_20261013_47,pressure60_allalg_rr157_uos157_1h_fixed_20261013_48,pressure60_allalg_rr157_uos157_1h_fixed_20261013_49,pressure60_allalg_rr157_uos157_1h_fixed_20261013_50,pressure60_allalg_rr157_uos157_1h_fixed_20261013_51,pressure60_allalg_rr157_uos157_1h_fixed_20261013_52,pressure60_allalg_rr157_uos157_1h_fixed_20261013_53,pressure60_allalg_rr157_uos157_1h_fixed_20261013_54,pressure60_allalg_rr157_uos157_1h_fixed_20261013_55,pressure60_allalg_rr157_uos157_1h_fixed_20261013_56,pressure60_allalg_rr157_uos157_1h_fixed_20261013_57,pressure60_allalg_rr157_uos157_1h_fixed_20261013_58,pressure60_allalg_rr157_uos157_1h_fixed_20261013_59"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_ROOT",
+    "value": "/media/rolling-cache"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZED_ROOT",
+    "value": "/media/rolling-cache-materialized"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_RETENTION_SECONDS",
+    "value": "4020"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_SEGMENT_SECONDS",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_FALLBACK_TO_REPLAY",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_CANDIDATE_LOOKAHEAD",
+    "value": "4"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_AGING_SECONDS",
+    "value": "60"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_WORKERS",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S",
+    "value": "1"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+    "value": "9"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS",
+    "value": "120"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.EVIDENCE_DENSITY_PROFILE",
+    "value": "high_density"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.POST_SAVANT_FAST_RAW_CLIP_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS",
+    "value": "10000"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S",
+    "value": "900"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES",
+    "value": "64"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_MAX_SCAN",
+    "value": "500"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT",
+    "value": "500"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",
+    "value": "2400"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL",
+    "value": "false"
+  },
+  {
+    "path": "media_worker_rolling_cache_restore.observed.EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED",
+    "value": "true"
+  },
+  {
+    "path": "rolling_cache_sinks_restore",
+    "type": "dict",
+    "count": 15
+  },
+  {
+    "path": "rolling_cache_sinks_restore.profiles",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_restore.services",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_restore.stopped",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_restore.recreated_stopped",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_restore.restarted_running",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_restore.original",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_sinks_restore.original.rolling-cache-sink",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.original.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.original.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.after",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "rolling_cache_sinks_restore.after.rolling-cache-sink",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.after.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.after.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "rolling_cache_sinks_restore.state_mismatches",
+    "type": "dict",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_restore.sanitized_inherited_env_keys",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_ROOT",
+    "value": "/media/rolling-cache"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_SEGMENT_SECONDS",
+    "value": "4"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_PUBLICATION_WORKERS",
+    "value": "1"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+    "value": "0"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+    "value": "1"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
+    "value": "fsync"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
+    "value": "split"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_FPS",
+    "value": "24"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_RUNTIME_EPOCH_ID",
+    "value": ""
+  },
+  {
+    "path": "rolling_cache_sinks_restore.daily_expected_env.ROLLING_CACHE_RETENTION_SECONDS",
+    "value": "300"
+  },
+  {
+    "path": "rolling_cache_sinks_restore.restored_env",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "rolling_cache_sinks_restore.restored_env.rolling-cache-sink-a",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "rolling_cache_sinks_restore.restored_env.rolling-cache-sink-b",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "rolling_cache_sinks_restore.env_mismatches",
+    "type": "dict",
+    "count": 0
+  },
+  {
+    "path": "rolling_cache_sinks_restore.publication_settings_supported",
+    "value": true
+  },
+  {
+    "path": "rolling_cache_sinks_restore.publication_settings_skipped",
+    "value": false
+  },
+  {
+    "path": "rolling_cache_sinks_restore.publication_settings_skip_reason",
+    "value": ""
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore",
+    "type": "dict",
+    "count": 13
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.disabled_cameras",
+    "value": 60
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_rules",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_zones",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_cameras",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_events",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_face_observations",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.deleted_person_bbox_observations",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.removed_evidence_paths",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.visual_results_retained",
+    "value": true
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.runtime_sources_apply_after_camera_cleanup",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.runtime_sources_apply_after_camera_cleanup.data",
+    "type": "dict",
+    "count": 21
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.runtime_sources_apply_after_camera_cleanup.error",
+    "value": null
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.runtime_sources_apply_after_camera_cleanup.request_id",
+    "value": "44884358-168b-470d-8749-2676c1edc788"
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.events",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.face_observations",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.person_observations",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.frame_annotations",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.record_requests",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.alerts",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.redis_deleted.security.face_rois.pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+    "value": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.removed_source_containers",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.source_dirs",
+    "value": 127
+  },
+  {
+    "path": "pressure_runtime_cleanup_after_restore.removed_rolling_cache.materialized_dirs",
+    "value": 0
+  },
+  {
+    "path": "source_container_cleanup_stable",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "source_container_cleanup_stable.checks",
+    "value": 3
+  },
+  {
+    "path": "source_container_cleanup_stable.stable",
+    "value": true
+  },
+  {
+    "path": "source_container_cleanup_stable.removed_count",
+    "value": 0
+  },
+  {
+    "path": "source_container_cleanup_stable.removed",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "db_summary_after_cleanup",
+    "type": "dict",
+    "count": 28
+  },
+  {
+    "path": "db_summary_after_cleanup.cameras",
+    "value": 60
+  },
+  {
+    "path": "db_summary_after_cleanup.events",
+    "value": 12023
+  },
+  {
+    "path": "db_summary_after_cleanup.suppressed_events",
+    "value": 7841
+  },
+  {
+    "path": "db_summary_after_cleanup.unsuppressed_events",
+    "value": 4182
+  },
+  {
+    "path": "db_summary_after_cleanup.tasks",
+    "value": 4182
+  },
+  {
+    "path": "db_summary_after_cleanup.bundles",
+    "value": 1316
+  },
+  {
+    "path": "db_summary_after_cleanup.playable_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_after_cleanup.behavior_video_playable_bundles",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.face_image_ready_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_after_cleanup.watchlist_image_ready_bundles",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_after_cleanup.covered_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.covered_playable_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.active_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.ready_waiting_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.unready_waiting_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.distinct_events_with_playable_evidence",
+    "value": 1305
+  },
+  {
+    "path": "db_summary_after_cleanup.distinct_events_without_playable_evidence",
+    "value": 10718
+  },
+  {
+    "path": "db_summary_after_cleanup.covered_but_not_playable_distinct_events",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.distinct_events_with_terminal_nonplayable_outcome",
+    "value": 10718
+  },
+  {
+    "path": "db_summary_after_cleanup.blocking_materialization_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.expired_without_attempt_tasks",
+    "value": 1235
+  },
+  {
+    "path": "db_summary_after_cleanup.active_materialization_leases",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.finalizer_pending_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.finalizer_pending_unleased_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.finalizer_pending_leased_tasks",
+    "value": 0
+  },
+  {
+    "path": "db_summary_after_cleanup.task_statuses",
+    "type": "list",
+    "count": 3
+  },
+  {
+    "path": "db_summary_after_cleanup.event_types",
+    "type": "list",
+    "count": 2
+  },
+  {
+    "path": "db_summary_after_cleanup.adaface_roi",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "db_summary_after_cleanup.adaface_roi.observations",
+    "value": 50068
+  },
+  {
+    "path": "db_summary_after_cleanup.adaface_roi.source_count",
+    "value": 60
+  },
+  {
+    "path": "db_summary_after_cleanup.adaface_roi.embedding_norm_min",
+    "value": 0.9993724434493587
+  },
+  {
+    "path": "db_summary_after_cleanup.adaface_roi.embedding_norm_max",
+    "value": 1.000645627406616
+  },
+  {
+    "path": "runtime_after_restore",
+    "type": "dict",
+    "count": 10
+  },
+  {
+    "path": "runtime_after_restore.generated_at_epoch_s",
+    "value": 1791850045
+  },
+  {
+    "path": "runtime_after_restore.metrics_url",
+    "value": "http://savant-security:8080/metrics"
+  },
+  {
+    "path": "runtime_after_restore.forwarder_metrics_url",
+    "value": "http://analysis-forwarder:8081/metrics"
+  },
+  {
+    "path": "runtime_after_restore.metrics",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "runtime_after_restore.metrics.available",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.metrics.sample_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.metrics.required_metric_names_seen",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.metrics.sources_active",
+    "value": null
+  },
+  {
+    "path": "runtime_after_restore.metrics.global",
+    "type": "dict",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.metrics.sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.metrics.fetch_seconds",
+    "value": 0.001
+  },
+  {
+    "path": "runtime_after_restore.forwarder",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "runtime_after_restore.forwarder.available",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.forwarder.sample_count",
+    "value": 4
+  },
+  {
+    "path": "runtime_after_restore.forwarder.global",
+    "type": "dict",
+    "count": 2
+  },
+  {
+    "path": "runtime_after_restore.forwarder.sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.forwarder.fetch_seconds",
+    "value": 0.001
+  },
+  {
+    "path": "runtime_after_restore.containers",
+    "type": "dict",
+    "count": 3
+  },
+  {
+    "path": "runtime_after_restore.containers.available",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.containers.fixed",
+    "type": "dict",
+    "count": 9
+  },
+  {
+    "path": "runtime_after_restore.containers.dynamic_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.supervisor",
+    "type": "dict",
+    "count": 20
+  },
+  {
+    "path": "runtime_after_restore.supervisor.enabled",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.supervisor.savant_container",
+    "value": "video-analytics-midterm-savant"
+  },
+  {
+    "path": "runtime_after_restore.supervisor.savant_container_running",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.supervisor.savant_module_status",
+    "value": "running"
+  },
+  {
+    "path": "runtime_after_restore.supervisor.source_adapters",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.supervisor.running_source_adapters",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.supervisor.desired_sources",
+    "type": "list",
+    "count": 61
+  },
+  {
+    "path": "runtime_after_restore.supervisor.desired_enabled_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.supervisor.source_convergence",
+    "type": "dict",
+    "count": 12
+  },
+  {
+    "path": "runtime_after_restore.supervisor.annotation_stream",
+    "value": "security.frame_annotations"
+  },
+  {
+    "path": "runtime_after_restore.supervisor.annotation_age_s",
+    "value": null
+  },
+  {
+    "path": "runtime_after_restore.supervisor.stall_check_enabled",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.supervisor.restart_replay",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.supervisor.auto_repair_stopped_sources",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.supervisor.in_cooldown",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.supervisor.source_convergence_in_cooldown",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.supervisor.last_source_convergence",
+    "type": "dict",
+    "count": 4
+  },
+  {
+    "path": "runtime_after_restore.supervisor.last_source_convergence_error",
+    "value": ""
+  },
+  {
+    "path": "runtime_after_restore.supervisor.last_recovery",
+    "value": null
+  },
+  {
+    "path": "runtime_after_restore.supervisor.last_loop",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "runtime_after_restore.evidence",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "runtime_after_restore.evidence.available",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.evidence.fetch_seconds",
+    "value": 0.39
+  },
+  {
+    "path": "runtime_after_restore.evidence.state_counts",
+    "type": "list",
+    "count": 6
+  },
+  {
+    "path": "runtime_after_restore.evidence.recent",
+    "type": "list",
+    "count": 12
+  },
+  {
+    "path": "runtime_after_restore.evidence.recent_failures",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier",
+    "type": "dict",
+    "count": 14
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.available",
+    "value": true
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.current_runtime_epoch_id",
+    "value": "midterm-20261013T000620Z-a3ec4a32"
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.blocking_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.active_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.tasks",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.source_breakdown",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.epoch_breakdown",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.current_epoch_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.foreign_epoch_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.missing_epoch_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.unknown_current_epoch_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.orphans_present",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.stale_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.epoch_barrier.stale_tasks",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.health",
+    "type": "dict",
+    "count": 7
+  },
+  {
+    "path": "runtime_after_restore.health.ok",
+    "value": false
+  },
+  {
+    "path": "runtime_after_restore.health.issues",
+    "type": "list",
+    "count": 1
+  },
+  {
+    "path": "runtime_after_restore.health.source_count",
+    "value": 0
+  },
+  {
+    "path": "runtime_after_restore.health.stale_sources",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.health.source_convergence",
+    "type": "dict",
+    "count": 5
+  },
+  {
+    "path": "runtime_after_restore.health.restart_count_high_containers",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "runtime_after_restore.health.restart_rate_high_containers",
+    "type": "list",
+    "count": 0
+  },
+  {
+    "path": "status",
+    "value": "failed_pressure_gates"
+  }
+]

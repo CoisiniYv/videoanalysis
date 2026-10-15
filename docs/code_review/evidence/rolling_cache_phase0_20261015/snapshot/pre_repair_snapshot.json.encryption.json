@@ -1,0 +1,11 @@
+{
+  "cipher": "AES-256-GCM",
+  "iv_hex": "506881e9a18e7601a212f6bd",
+  "auth_tag_hex": "8ec8c764fb85533305a658c2830e8df1",
+  "plaintext_sha256": "bd5a4f5f622205f087898b74b235bd4f22844de9514d95ef461f1a510fda0094",
+  "ciphertext_sha256": "083ab21ecdbb8c1818ca49ccdf7f5961dc81d08c69ea01c4d1381eeb725fef6e",
+  "plaintext_bytes": 500074,
+  "private_key_path": "/Users/khonsu/.codex/private-evidence/rolling_cache_phase0_20261015/snapshot-aes256gcm.key",
+  "retained_plaintext_path": "/Users/khonsu/.codex/private-evidence/rolling_cache_phase0_20261015/pre_repair_snapshot.json",
+  "note": "Complete unredacted Docker inspect snapshot is encrypted; no server files were modified."
+}

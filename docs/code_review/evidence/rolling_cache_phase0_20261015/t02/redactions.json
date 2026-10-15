@@ -1,0 +1,37 @@
+{
+  "generated_at_utc": "2026-10-15T10:10:59.120Z",
+  "original_copies_outside_repository": "/tmp/savant-t02-raw-20261015",
+  "rule": "URI userinfo redacted; original remote artifact hashes retained separately",
+  "files": [
+    {
+      "name": "1012_report_schema.json",
+      "original_sha256": "00e6cc5e546b31c325f3e2d2f8589ce481d14349f6c42a94afc942a1b91db1a9",
+      "sanitized_sha256": "3a12f1b26f06ac96be92d624a73aa9f56182efe41c6b3d9d18fa66ebe8daa960"
+    },
+    {
+      "name": "1012_run_config.json",
+      "original_sha256": "1a0f27d992be8b5b3b31cce62ddfa59fcaee96054d88df9dc8bbd6e3b27ec96d",
+      "sanitized_sha256": "802ec92103a269dbe8c83e2ec2216cc5e1ce77704637e0a61336d7d7eb607f23"
+    },
+    {
+      "name": "1013_report_schema.json",
+      "original_sha256": "1367928815a5468e9f2a639adfc202d80988fe6b5b8bf1fdb03792ccebf3dc61",
+      "sanitized_sha256": "2b3e518efa48f626a765efd38d649c004967d37e00ea978f74a8e1b4b52e637e"
+    },
+    {
+      "name": "1013_run_config.json",
+      "original_sha256": "7cbd6feefdef36697e4288dc2d095507ffdd9b53ab56aa0f13bfc471e9eb2709",
+      "sanitized_sha256": "fbba81dc97cc048227b692519bbf95e2ab345139e42bb7fc94e912768868f194"
+    },
+    {
+      "name": "extract_reports.capture.json",
+      "original_sha256": "3c97e2070a7d01cbf1b9e6ff833e43dfdfdd78184382114fd06711023e22e271",
+      "sanitized_sha256": "f27079fe7d3892ce22a1d128cc1e07be7affd63ef6b21574b40905fad58984d2"
+    },
+    {
+      "name": "t02_findings.json",
+      "original_sha256": "52b99d65c7b105fabe5d1f6554696fb3ffcde129036d9c00142554abc0fe4d48",
+      "sanitized_sha256": "6a5db7f6e5577111ff3fabec44fe769f914f9f3e9ce663183868eba4fc62e4a1"
+    }
+  ]
+}
