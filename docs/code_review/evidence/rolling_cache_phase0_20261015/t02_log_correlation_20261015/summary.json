@@ -1,0 +1,341 @@
+{
+  "generated_at_utc": "2026-10-15T11:27:27.378211+00:00",
+  "capture_completed_at_utc": "2026-10-15T11:24:50.994Z",
+  "capture_completed_at_kst": "2026-10-15T20:24:50.994000+09:00",
+  "source_root": "/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2",
+  "inputs": {
+    "non_materialized_task_details.json": {
+      "bytes": 7791050,
+      "sha256": "7af4ddbf382333cc45b4921864edb1dbd7e8be20626ad9f0b92a2c8146607ee8",
+      "count": 2877
+    },
+    "media_worker_logs_since_start.txt": {
+      "bytes": 183482765,
+      "sha256": "093aaade36587ba5481380016e228b7877ef81224b1c065c3a6bee1485a9ebd4"
+    }
+  },
+  "inputs_same_sha256_as_first_t02_capture": true,
+  "normalization": {
+    "source_commit": "98d388c",
+    "source_path": "libs/evidence_lifecycle/contract.py",
+    "copied_source_file": "normalization_contract_98d388c.py",
+    "copied_source_sha256": "918ce04d25aa46200c2a10c8805c9062e5944a7ab205e704fde80df89a45bf23",
+    "function": "normalize_reason_code",
+    "meaning": "Normative mapping of observed reason text using the taskbook baseline contract; not a claim about recovered database audit or historical image code identity."
+  },
+  "method": "Exact event_id join to the historical non-materialized ART cohort; last persisted=True retry log at or before each artifact task_updated_at. This is a log observation, not recovered database lifecycle_v2_retry audit.",
+  "timestamp_interpretation": "Naive container timestamps interpreted as UTC, consistent with earlier last_pts cross-check; historical TZ snapshot unavailable.",
+  "log_counts": {
+    "parsed_lines": 32687,
+    "persisted_true": 32687,
+    "cohort_lines": 32486,
+    "outside_cohort_lines": 201
+  },
+  "cohort_count": 2877,
+  "expired_count": 2876,
+  "clip_required_expired_count": 2866,
+  "clip_required_expired_with_observed_edge_coverage_reason": 1641,
+  "clip_required_expired_never_attempted": 1225,
+  "clip_required_expired_observed_edge_coverage_fraction": 0.5725750174459177,
+  "clip_required_expired_never_attempted_fraction": 0.42742498255408234,
+  "database_task_type_available": false,
+  "database_lifecycle_audit_recovered": false,
+  "unparsed_deferred_line_count": 0,
+  "duplicate_event_id_count": 0,
+  "groups": [
+    {
+      "materialization_status": "materialization_expired",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "never_attempted_in_artifact": false,
+      "last_observed_normalized_reason": "coverage_not_complete",
+      "log_reason_subtype": "missing_post_window",
+      "count": 1638
+    },
+    {
+      "materialization_status": "materialization_expired",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "never_attempted_in_artifact": false,
+      "last_observed_normalized_reason": "coverage_not_complete",
+      "log_reason_subtype": "missing_pre_and_post_window",
+      "count": 3
+    },
+    {
+      "materialization_status": "materialization_expired",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "never_attempted_in_artifact": true,
+      "last_observed_normalized_reason": null,
+      "log_reason_subtype": "no_retry_log_and_artifact_attempt_count_zero",
+      "count": 1225
+    },
+    {
+      "materialization_status": "materialization_expired",
+      "event_type": "watchlist_hit",
+      "artifact_clip_required": false,
+      "never_attempted_in_artifact": true,
+      "last_observed_normalized_reason": null,
+      "log_reason_subtype": "no_retry_log_and_artifact_attempt_count_zero",
+      "count": 10
+    },
+    {
+      "materialization_status": "materialization_failed",
+      "event_type": "watchlist_hit",
+      "artifact_clip_required": false,
+      "never_attempted_in_artifact": false,
+      "last_observed_normalized_reason": null,
+      "log_reason_subtype": "no_matching_persisted_retry_log_before_artifact_update",
+      "count": 1
+    }
+  ],
+  "subtype_counts": {
+    "missing_post_window": 1638,
+    "missing_pre_and_post_window": 3,
+    "no_retry_log_and_artifact_attempt_count_zero": 1235,
+    "no_matching_persisted_retry_log_before_artifact_update": 1
+  },
+  "excluded_post_snapshot_event_rows": [
+    {
+      "event_id": "6b071cfc-1af9-45bc-83fa-de87c3132279",
+      "count": 1,
+      "status": "materialization_failed",
+      "failure_reason": "face_image_frame_not_found"
+    }
+  ],
+  "ready_at_5m_expired_only": [
+    {
+      "bucket_start_utc": "2026-10-12T21:30:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:30:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 52
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_pre_and_post_window",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T21:35:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:35:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 245
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T21:40:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:40:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 300
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T21:45:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:45:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 258
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T21:50:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:50:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 223
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T21:55:00+00:00",
+      "bucket_start_kst": "2026-10-13T06:55:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 239
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:00:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:00:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 237
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:05:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:05:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 49
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 111
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:10:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:10:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 216
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 14
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:15:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:15:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 124
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 8
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:20:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:20:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 292
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 8
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:25:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:25:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 239
+        },
+        {
+          "event_type": "watchlist_hit",
+          "artifact_clip_required": false,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 10
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "bucket_start_utc": "2026-10-12T22:30:00+00:00",
+      "bucket_start_kst": "2026-10-13T07:30:00+09:00",
+      "groups": [
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "unavailable",
+          "subtype": "no_retry_log_and_artifact_attempt_count_zero",
+          "count": 243
+        },
+        {
+          "event_type": "intrusion",
+          "artifact_clip_required": true,
+          "last_observed_normalized_reason": "coverage_not_complete",
+          "subtype": "missing_post_window",
+          "count": 4
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Last observed persisted retry before ART task_updated_at is not the database lifecycle_v2_retry audit.",
+    "task_type is absent; clip_required is an explicit event-media flag, not a recovered task type.",
+    "No retry log is not by itself proof of never attempted; the separate attempt_count=0 flag comes from ART.",
+    "The ART cohort contains non-materialized tasks only; successful-task ready_at buckets remain unavailable.",
+    "The historical host override environment and physical mount chain remain outside this log correlation.",
+    "This authorized historical log supplement does not block separately authorized stage 1 work."
+  ]
+}

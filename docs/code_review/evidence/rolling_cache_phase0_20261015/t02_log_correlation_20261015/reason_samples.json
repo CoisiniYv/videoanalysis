@@ -1,0 +1,468 @@
+{
+  "coverage_not_complete": [
+    {
+      "task_id": "01eaae7a-3d83-52a4-bfdc-51b72a75eb63",
+      "event_id": "4ec0fef1-eb48-404a-81e1-8dc3d1336899",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8466,
+        "at_epoch_s": 1791841169.116,
+        "at_utc": "2026-10-12T21:39:29.116000+00:00",
+        "at_kst": "2026-10-13T06:39:29.116000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=9999999876",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,116 INFO app.worker rolling_cache_coverage_deferred event_id=4ec0fef1-eb48-404a-81e1-8dc3d1336899 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=9999999876 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "116d5387-1adb-5376-8306-d5e99fb25d2e",
+      "event_id": "b5ff50d2-f11d-4843-a6e4-59932e7b6981",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8300,
+        "at_epoch_s": 1791841165.596,
+        "at_utc": "2026-10-12T21:39:25.596000+00:00",
+        "at_kst": "2026-10-13T06:39:25.596000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=8000000075",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,596 INFO app.worker rolling_cache_coverage_deferred event_id=b5ff50d2-f11d-4843-a6e4-59932e7b6981 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=8000000075 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "cf0e3087-ca1a-5ce9-b132-f7e848cd8039",
+      "event_id": "450978a4-3c67-4636-a2f3-336daecc41eb",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8326,
+        "at_epoch_s": 1791841166.113,
+        "at_utc": "2026-10-12T21:39:26.113000+00:00",
+        "at_kst": "2026-10-13T06:39:26.113000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=2000000036",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:26,113 INFO app.worker rolling_cache_coverage_deferred event_id=450978a4-3c67-4636-a2f3-336daecc41eb reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=2000000036 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "bf41df84-7065-578a-8a5c-4ef980d39fad",
+      "event_id": "6050ebab-fbed-42e8-9c4b-1a5a35ec9e83",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8289,
+        "at_epoch_s": 1791841165.373,
+        "at_utc": "2026-10-12T21:39:25.373000+00:00",
+        "at_kst": "2026-10-13T06:39:25.373000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=4999999958",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,373 INFO app.worker rolling_cache_coverage_deferred event_id=6050ebab-fbed-42e8-9c4b-1a5a35ec9e83 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=4999999958 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "4a6438b9-08fe-5053-b015-bf8b2bd5a5c9",
+      "event_id": "9da49e85-850a-4a82-b279-f5f5abef4428",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8491,
+        "at_epoch_s": 1791841169.654,
+        "at_utc": "2026-10-12T21:39:29.654000+00:00",
+        "at_kst": "2026-10-13T06:39:29.654000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000029",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,654 INFO app.worker rolling_cache_coverage_deferred event_id=9da49e85-850a-4a82-b279-f5f5abef4428 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000029 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "8bf3a0b9-829d-5027-9ea4-9153cfd999c3",
+      "event_id": "2ee485ce-477a-47b3-ba32-e9fa6d6321db",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8453,
+        "at_epoch_s": 1791841168.857,
+        "at_utc": "2026-10-12T21:39:28.857000+00:00",
+        "at_kst": "2026-10-13T06:39:28.857000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999894",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,857 INFO app.worker rolling_cache_coverage_deferred event_id=2ee485ce-477a-47b3-ba32-e9fa6d6321db reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999894 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "34c98b42-85eb-5abb-9203-63c68329a6bf",
+      "event_id": "89f39f67-ea05-4e8c-b895-c1b53a64fd08",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8427,
+        "at_epoch_s": 1791841168.31,
+        "at_utc": "2026-10-12T21:39:28.310000+00:00",
+        "at_kst": "2026-10-13T06:39:28.310000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999926",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,310 INFO app.worker rolling_cache_coverage_deferred event_id=89f39f67-ea05-4e8c-b895-c1b53a64fd08 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999926 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "6054a4f3-f850-52f1-a5d8-4337031776ef",
+      "event_id": "7cfa291a-df82-418b-a0e6-91bedd80f818",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8455,
+        "at_epoch_s": 1791841168.874,
+        "at_utc": "2026-10-12T21:39:28.874000+00:00",
+        "at_kst": "2026-10-13T06:39:28.874000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=10000000107",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,874 INFO app.worker rolling_cache_coverage_deferred event_id=7cfa291a-df82-418b-a0e6-91bedd80f818 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=10000000107 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "81b4da4c-2c26-57e2-aaa2-06f35e3f5de3",
+      "event_id": "2dcd366e-5d97-4a50-b43d-6bef70a6e04c",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8303,
+        "at_epoch_s": 1791841165.652,
+        "at_utc": "2026-10-12T21:39:25.652000+00:00",
+        "at_kst": "2026-10-13T06:39:25.652000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=7999999919",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,652 INFO app.worker rolling_cache_coverage_deferred event_id=2dcd366e-5d97-4a50-b43d-6bef70a6e04c reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=7999999919 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "19dab0dc-c558-5c6f-ae69-4d459b9d58b4",
+      "event_id": "ddc850cb-f053-435f-8a4d-f22a2faf643d",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8479,
+        "at_epoch_s": 1791841169.38,
+        "at_utc": "2026-10-12T21:39:29.380000+00:00",
+        "at_kst": "2026-10-13T06:39:29.380000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000040",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,380 INFO app.worker rolling_cache_coverage_deferred event_id=ddc850cb-f053-435f-8a4d-f22a2faf643d reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000040 retry_after_s=2.000 persisted=True generation=28"
+      }
+    }
+  ],
+  "subtype:missing_post_window": [
+    {
+      "task_id": "01eaae7a-3d83-52a4-bfdc-51b72a75eb63",
+      "event_id": "4ec0fef1-eb48-404a-81e1-8dc3d1336899",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8466,
+        "at_epoch_s": 1791841169.116,
+        "at_utc": "2026-10-12T21:39:29.116000+00:00",
+        "at_kst": "2026-10-13T06:39:29.116000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=9999999876",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,116 INFO app.worker rolling_cache_coverage_deferred event_id=4ec0fef1-eb48-404a-81e1-8dc3d1336899 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=9999999876 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "116d5387-1adb-5376-8306-d5e99fb25d2e",
+      "event_id": "b5ff50d2-f11d-4843-a6e4-59932e7b6981",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8300,
+        "at_epoch_s": 1791841165.596,
+        "at_utc": "2026-10-12T21:39:25.596000+00:00",
+        "at_kst": "2026-10-13T06:39:25.596000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=8000000075",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,596 INFO app.worker rolling_cache_coverage_deferred event_id=b5ff50d2-f11d-4843-a6e4-59932e7b6981 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=8000000075 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "cf0e3087-ca1a-5ce9-b132-f7e848cd8039",
+      "event_id": "450978a4-3c67-4636-a2f3-336daecc41eb",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:32.984807+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8326,
+        "at_epoch_s": 1791841166.113,
+        "at_utc": "2026-10-12T21:39:26.113000+00:00",
+        "at_kst": "2026-10-13T06:39:26.113000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=2000000036",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:26,113 INFO app.worker rolling_cache_coverage_deferred event_id=450978a4-3c67-4636-a2f3-336daecc41eb reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=2000000036 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "bf41df84-7065-578a-8a5c-4ef980d39fad",
+      "event_id": "6050ebab-fbed-42e8-9c4b-1a5a35ec9e83",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8289,
+        "at_epoch_s": 1791841165.373,
+        "at_utc": "2026-10-12T21:39:25.373000+00:00",
+        "at_kst": "2026-10-13T06:39:25.373000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=4999999958",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,373 INFO app.worker rolling_cache_coverage_deferred event_id=6050ebab-fbed-42e8-9c4b-1a5a35ec9e83 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=4999999958 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "4a6438b9-08fe-5053-b015-bf8b2bd5a5c9",
+      "event_id": "9da49e85-850a-4a82-b279-f5f5abef4428",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8491,
+        "at_epoch_s": 1791841169.654,
+        "at_utc": "2026-10-12T21:39:29.654000+00:00",
+        "at_kst": "2026-10-13T06:39:29.654000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000029",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,654 INFO app.worker rolling_cache_coverage_deferred event_id=9da49e85-850a-4a82-b279-f5f5abef4428 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000029 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "8bf3a0b9-829d-5027-9ea4-9153cfd999c3",
+      "event_id": "2ee485ce-477a-47b3-ba32-e9fa6d6321db",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8453,
+        "at_epoch_s": 1791841168.857,
+        "at_utc": "2026-10-12T21:39:28.857000+00:00",
+        "at_kst": "2026-10-13T06:39:28.857000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999894",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,857 INFO app.worker rolling_cache_coverage_deferred event_id=2ee485ce-477a-47b3-ba32-e9fa6d6321db reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999894 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "34c98b42-85eb-5abb-9203-63c68329a6bf",
+      "event_id": "89f39f67-ea05-4e8c-b895-c1b53a64fd08",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8427,
+        "at_epoch_s": 1791841168.31,
+        "at_utc": "2026-10-12T21:39:28.310000+00:00",
+        "at_kst": "2026-10-13T06:39:28.310000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999926",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,310 INFO app.worker rolling_cache_coverage_deferred event_id=89f39f67-ea05-4e8c-b895-c1b53a64fd08 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=1999999926 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "6054a4f3-f850-52f1-a5d8-4337031776ef",
+      "event_id": "7cfa291a-df82-418b-a0e6-91bedd80f818",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8455,
+        "at_epoch_s": 1791841168.874,
+        "at_utc": "2026-10-12T21:39:28.874000+00:00",
+        "at_kst": "2026-10-13T06:39:28.874000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=10000000107",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,874 INFO app.worker rolling_cache_coverage_deferred event_id=7cfa291a-df82-418b-a0e6-91bedd80f818 reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=10000000107 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "81b4da4c-2c26-57e2-aaa2-06f35e3f5de3",
+      "event_id": "2dcd366e-5d97-4a50-b43d-6bef70a6e04c",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8303,
+        "at_epoch_s": 1791841165.652,
+        "at_utc": "2026-10-12T21:39:25.652000+00:00",
+        "at_kst": "2026-10-13T06:39:25.652000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=7999999919",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:25,652 INFO app.worker rolling_cache_coverage_deferred event_id=2dcd366e-5d97-4a50-b43d-6bef70a6e04c reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=7999999919 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "19dab0dc-c558-5c6f-ae69-4d459b9d58b4",
+      "event_id": "ddc850cb-f053-435f-8a4d-f22a2faf643d",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_post_window",
+      "log": {
+        "line": 8479,
+        "at_epoch_s": 1791841169.38,
+        "at_utc": "2026-10-12T21:39:29.380000+00:00",
+        "at_kst": "2026-10-13T06:39:29.380000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000040",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:29,380 INFO app.worker rolling_cache_coverage_deferred event_id=ddc850cb-f053-435f-8a4d-f22a2faf643d reason=rolling_cache_requested_window_not_fully_covered:post_gap_ns=3000000040 retry_after_s=2.000 persisted=True generation=28"
+      }
+    }
+  ],
+  "subtype:missing_pre_and_post_window": [
+    {
+      "task_id": "b3781227-478f-551a-8f2d-1a6506fa505e",
+      "event_id": "cdc6c3eb-dc6d-40c7-b034-6f1e117e2c49",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_pre_and_post_window",
+      "log": {
+        "line": 8441,
+        "at_epoch_s": 1791841168.624,
+        "at_utc": "2026-10-12T21:39:28.624000+00:00",
+        "at_kst": "2026-10-13T06:39:28.624000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708492,post_gap_ns=7999999897",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,624 INFO app.worker rolling_cache_coverage_deferred event_id=cdc6c3eb-dc6d-40c7-b034-6f1e117e2c49 reason=rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708492,post_gap_ns=7999999897 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "4254a7b2-8d91-5c25-ba4a-7de202c883be",
+      "event_id": "96f2e16e-4974-421f-a0f1-fb669aeec487",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_pre_and_post_window",
+      "log": {
+        "line": 8437,
+        "at_epoch_s": 1791841168.559,
+        "at_utc": "2026-10-12T21:39:28.559000+00:00",
+        "at_kst": "2026-10-13T06:39:28.559000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708474,post_gap_ns=7999999915",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,559 INFO app.worker rolling_cache_coverage_deferred event_id=96f2e16e-4974-421f-a0f1-fb669aeec487 reason=rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708474,post_gap_ns=7999999915 retry_after_s=2.000 persisted=True generation=28"
+      }
+    },
+    {
+      "task_id": "9b23464b-857b-5b45-9218-322ba8cba0ac",
+      "event_id": "23ccc082-057d-4e57-a51b-801080ba44e9",
+      "event_type": "intrusion",
+      "artifact_clip_required": true,
+      "task_updated_at_utc": "2026-10-12 21:39:36.069599+00:00",
+      "normalized_reason": "coverage_not_complete",
+      "subtype": "missing_pre_and_post_window",
+      "log": {
+        "line": 8438,
+        "at_epoch_s": 1791841168.568,
+        "at_utc": "2026-10-12T21:39:28.568000+00:00",
+        "at_kst": "2026-10-13T06:39:28.568000+09:00",
+        "reason_detail": "rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708374,post_gap_ns=8000000015",
+        "retry_after_s": 2.0,
+        "persisted": true,
+        "generation": 28,
+        "raw_line": "2026-10-12 21:39:28,568 INFO app.worker rolling_cache_coverage_deferred event_id=23ccc082-057d-4e57-a51b-801080ba44e9 reason=rolling_cache_requested_window_not_fully_covered:pre_gap_ns=1034708374,post_gap_ns=8000000015 retry_after_s=2.000 persisted=True generation=28"
+      }
+    }
+  ]
+}

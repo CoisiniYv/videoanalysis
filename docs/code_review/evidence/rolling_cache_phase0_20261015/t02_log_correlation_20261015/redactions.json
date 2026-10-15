@@ -1,0 +1,17 @@
+{
+  "generated_at_utc": "2026-10-15T11:29:38.422Z",
+  "original_copies_outside_repository": "/tmp/savant-t02-log-correlation-raw-20261015",
+  "rule": "URI userinfo redacted; remote input SHA256 retained in summary.inputs",
+  "files": [
+    {
+      "name": "probe_log_events.capture.json",
+      "original_sha256": "135a41e3c4445e9d50e7a496b67c4d4af75970c3a9dfdb024d7bd2a2f9d19001",
+      "sanitized_sha256": "c0c6783e89eeb2ba0352f4be6bfa3263aba0dc0524397b07dc84fae06dc3d512"
+    },
+    {
+      "name": "probe_log_events.json",
+      "original_sha256": "378df706ef67aa034d199267d3e0864b4cd91532eb15ba71a83f7ae1df4a5de3",
+      "sanitized_sha256": "b8bf85224aaf890e3db3a04eb1a4e11e5521909cbf4b011d9b964fa51f37712a"
+    }
+  ]
+}

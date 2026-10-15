@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-**停止在阶段 0，T0.3 决策门未通过。** 允许读取的历史产物没有保存任务的 `materialization_retry_reason` 或 `materialization_audit`，不能取得归一化的 `last_reason` 与重试 `detail`，命中 T0.3 第⑤类。发布可见延迟随时间持续上升已确认，但不能用它替代任务级原因审计，或据此进入阶段 1。
+**初次核查结论：T0.3 决策门证据不完整。** 历史 JSON 没有保存任务的 `materialization_retry_reason` 或 `materialization_audit`，当时按 T0.3 第⑤类停止。用户随后授权只读历史日志关联，并明确该补充不阻塞另行授权的阶段 1。新增结果见第 8 节：已恢复 1,641 个过期事件在快照之前最后一次观测到的已持久化重试原文，均映射为窗口边缘缺口；它们不是恢复出的数据库 lifecycle audit。
 
 本报告只复盘历史文件，不修服务、不复测、不连数据库、不创建容器。当前盘位、业务影响和方案 A 另见同目录阶段 0 报告；不能用当前容器日志或环境反证 10-13 的环境。
 
@@ -142,4 +142,46 @@
 
 **未核实/无法取得：** 任务归一化最后原因与 detail、完整 task_type/ready_at 成功过期分桶、历史 compose 内容、`PRESSURE_ROLLING_CACHE_ROOT_HOST`、历史镜像哈希/原始 stale-resync 指标、10-12 超过 600 秒的快照留存原因、全算法启用记录。磁盘历史 **ART 中无**；本次授权仅限 `$ART`，未读 `/var/log/sysstat/sa13`，不能声称服务器没有历史 sar。
 
-下一步保持阶段 0。方案 A 只准备可审查执行单，待用户批准。T0.3 第⑤类需要用户决定是否扩大历史证据读取范围或明确如何处理缺失的当轮审计字段；在决策前不进入阶段 1，不申请或执行阶段 2。所有服务、镜像、数据和 main 保持本次只读约束。
+初次核查据此停在阶段 0。用户后续已授权第 8 节的历史日志补充，且明确不阻塞另行授权的阶段 1；本报告不把日志补充当作阶段 2 或方案 A 的执行批准。所有服务、镜像、数据和 main 保持本次只读约束。
+
+## 8. 后续授权：按 event_id 关联历史重试日志
+
+**结论：日志关联已完成，数据库审计缺失没有被冒称补齐。** 在用户后续授权下，仅重新读取 10-13 `$ART` 的 `media_worker_logs_since_start.txt`、`event_worker_logs_since_start.txt` 和已经获准读取的 `non_materialized_task_details.json`；没有查询历史库、活服务或其他目录。新增证据独立存入 [日志关联目录](evidence/rolling_cache_phase0_20261015/t02_log_correlation_20261015/README.md)，旧证据及旧 `MANIFEST.sha256` 不变。
+
+关联采集完成时间：**2026-10-15 20:24:50.994 KST**；原始 UTC `2026-10-15T11:24:50.994Z`。`media_worker` 日志与非成功明细的 SHA256 均与初次采集一致，见 `summary.inputs_same_sha256_as_first_t02_capture=true`，没有观察到这两份 ART 在两次采集间变化。
+
+### 关联口径
+
+以 ART 非成功明细中的 2,877 个 `event_id` 为 cohort，不用整个压测前缀上的其他历史行。逐条解析 `rolling_cache_coverage_deferred event_id=... reason=... retry_after_s=... persisted=... generation=...`，每个事件只选其 ART `task_updated_at` **之前最后一次 `persisted=True`** 的重试日志。时间继续按容器日志的 UTC 解释，并同时保存 KST。结果是“日志中最后一次观测到的已持久化重试”，不能等同于查询数据库 `lifecycle_v2_retry` 的值。
+
+归一化直接运行仓库基线 `98d388c:libs/evidence_lifecycle/contract.py` 的 `normalize_reason_code`。该原件及其 SHA256 随证据保存；这说明本次如何映射异常原文，不用于证明历史镜像恰好装了该代码版本。
+
+### 已确认的分类
+
+| 指标 | 数量 | 新证据来源 |
+|---|---:|---|
+| 解析的延期日志 | 32,687 | `summary.log_counts.parsed_lines` |
+| 其中 `persisted=True` | 32,687 | `summary.log_counts.persisted_true` |
+| 属于 ART cohort / 不属于 cohort 的日志 | 32,486 / 201 | `cohort_lines` / `outside_cohort_lines` |
+| cohort 重复 event_id / 无法解析的延期日志 | 0 / 0 | `duplicate_event_id_count` / `unparsed_deferred_line_count` |
+| 可关联快照前最后已持久化重试的过期事件 | 1,641 | `summary.groups` 中 `last_observed_normalized_reason=coverage_not_complete` |
+| 最后原文只有 `post_gap_ns=` | 1,638 | `subtype_counts.missing_post_window` |
+| 最后原文同时有 `pre_gap_ns=`、`post_gap_ns=` | 3 | `subtype_counts.missing_pre_and_post_window` |
+| ART 尝试数为 0 且没有关联重试日志 | 1,235 | `subtype_counts.no_retry_log_and_artifact_attempt_count_zero` |
+| 只有快照之后的重试、未纳入最后原因 | 1 | `excluded_post_snapshot_event_rows`，该行是图片失败 |
+
+1,641 条最后原文均为 `rolling_cache_requested_window_not_fully_covered:...`，由基线契约映射为 `coverage_not_complete`，细节均是窗口前后边缘缺口。**已确认**：已关联的最后原因中没有 `internal_gap_ns=`、`requested_window_internal_gap`、`rolling_cache_output_duration_short`、`rolling_cache_output_frame_rate_low` 或 `capacity_unavailable`。这只描述此次 cohort 的已关联最后原因，不能推成全运行期没有这些问题。
+
+ART 中还明确保存了 `event_media.clip_required`。2,876 个过期事件中，有 2,866 个 `clip_required=true`，其余 10 个是图片要求；在这 2,866 个明确要求视频的事件里，1,641 个（**57.26%**）有上述窗口边缘缺口日志，1,225 个（**42.74%**）的 ART `attempt_count=0` 且无重试日志。来源为 `summary.clip_required_expired_*`。这是按明确的事件媒体要求分组，仍不是恢复出的数据库 `task_type`。不能再用第 6 节所有过期类型的 `1235/2876` 代替这个视频要求子集。
+
+另 1 个失败事件是 `clip_required=false`、`snapshot_required=true`，ART `failure_reason=face_image_frame_not_found`；其唯一关联重试出现在 ART `task_updated_at` 之后，已排除。它不是 T0.3 第②类的视频专属故障证据。
+
+### 样本、分桶与边界
+
+[reason_samples.json](evidence/rolling_cache_phase0_20261015/t02_log_correlation_20261015/reason_samples.json) 保存归一化 `coverage_not_complete` 的 10 个不同事件原文，以及细分 `post_gap` 的 10 个、`pre+post` 的全部 3 个样本；每条都有 event_id、task_id、源日志行号、UTC/KST、原文、persisted 和 generation。双边缺口总共只有 3 个，不虚构第 4–10 个样本。
+
+[correlated_events.json](evidence/rolling_cache_phase0_20261015/t02_log_correlation_20261015/correlated_events.json) 保存全部 2,877 个事件的关联和缺失状态；[summary.json](evidence/rolling_cache_phase0_20261015/t02_log_correlation_20261015/summary.json) 的 `ready_at_5m_expired_only` 保存按 ART ready_at 的 13 个五分钟桶。ART cohort 只有非成功任务，**成功任务的 ready_at 分桶仍无法取得**；没有用日志完成时刻替代 ready_at。
+
+**推断：** 在已关联的已尝试视频要求事件中，发布素材尚未覆盖要求窗口是共同的重试原因，与前述发布可见延迟持续增长相符。该结论不解释 1,225 个从未尝试的视频要求事件为何没有获得尝试，也不证明完整物理盘链或队龄机制。数据库原始最后 audit、真实 task_type、成功任务 ready_at 与历史宿主存储环境仍未取得。
+
+本次用户已明确允许该历史补充与阶段 1 并行，因此本补充不增加阶段 1 的等待条件；方案 A、正式服务操作和阶段 2 的维护窗口仍分别需要用户批准。
