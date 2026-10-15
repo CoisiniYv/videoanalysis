@@ -12,10 +12,12 @@ checks (exit 0 / 2); all 30 production containers were unchanged. The current
 full harness has 11 failures, each present in baseline 98d388c (15 failures),
 with no new collection error. Completion-wake compatibility, explicit scheduler
 setting verification, pollution test doubles, and minimal invalid-argument
-reports are repaired. Stage 1 is ready for push and Opus review. The user now
-allows up to three repair rounds within stage 1, while preserving these gates.
+reports are repaired. Code commit fc77792 has been pushed; the Opus request was
+rejected by the configured review provider with HTTP 403 / insufficient balance,
+before any model tokens or review. Stage 1 awaits a usable Opus channel. The user
+now allows up to three repair rounds within stage 1, while preserving these gates.
 See [the development and validation record](../docs/midterm_pressure_storage_guard_2026-10-15.md).
-Production deployment is unchanged. Push, Opus review, and a separately approved
+Production deployment is unchanged. Opus approval and a separately approved
 maintenance window remain required before stage 2; this status is not a load-test
 acceptance result.
 
