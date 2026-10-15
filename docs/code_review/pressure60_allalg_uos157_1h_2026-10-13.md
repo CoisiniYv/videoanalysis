@@ -144,6 +144,14 @@
 
 初次核查据此停在阶段 0。用户后续已授权第 8 节的历史日志补充，且明确不阻塞另行授权的阶段 1；本报告不把日志补充当作阶段 2 或方案 A 的执行批准。所有服务、镜像、数据和 main 保持本次只读约束。
 
+### 下一步：历史配置一致性与阶段 3 待查项
+
+**已确认：历史产物与 `98d388c` 的直连生成路径不一致。** [10-13 run_config](evidence/rolling_cache_phase0_20261015/t02/1013_run_config.json) 同时记录 `dual_shard_same_gpu=true`、`rolling_cache_evidence=true`；基线 `98d388c:scripts/runtime/run_midterm_pressure60.py` 的 `_uses_direct_rolling_cache_ingress` 据此进入直连路径（原码 3034–3037 行），该路径在生成 A/B override 时必写 `FORWARDER_STRICT_FPS_BUDGET="true"` 和 `FORWARDER_MAX_QUEUE_AGE_MS=str(cfg.analysis_max_queue_age_ms)`（原码 3247–3266 行）。即使队龄参数为 0，该键也不会被省略。可是 [10-13 保存的 override](evidence/rolling_cache_phase0_20261015/t02/1013_compose.dual-shard-same-gpu.override.yml) 的两个 A/B 环境段都缺这两项，run_config 也没有 `analysis_max_queue_age_ms`；[10-12 override](evidence/rolling_cache_phase0_20261015/t02/1012_compose.dual-shard-same-gpu.override.yml) 则保存了 30,000 ms / true。因而不能把 10-13 称作已复现 `98d388c` 脚本及参数的运行。**推断：** 实际脚本版本、参数记录、生成路径或归档文件至少有一项与该基线不一致；究竟是哪一项、历史容器实际值与镜像版本均**未核实**，不把差异直接归因为队龄关闭。
+
+后续配置核对应同时保存脚本 commit、完整命令、生成 override、合并后的 compose config 与运行容器 Env/镜像哈希，核对直连 A/B 的队龄、strict 及运行指标解析字段；历史证据无法恢复的项明确保留未知。另须控制 publication workers（10-13 / 10-12 为 4 / 1）、CPU 隔离（none / t4-16cpu-evidence）、MPS（false / true）、batch timeout（40,000 / 10,000）的差异，不能把两轮结果只归因于磁盘。workers 来源为各轮 `selected_report.rolling_cache_sinks_pressure.observed_env`，其余来源为上述两个 `run_config`，与第 6 节一致。
+
+**阶段 3 待查，尚未实现：** 第 8 节日志中已尝试的视频要求事件多次延期，可能使延期重试任务持续占用调度机会，让部分新视频任务直到业务期限都未获得首次尝试。这是用于解释 1,225 个从未尝试视频要求事件的**推断/待验证假设**，不是已确认原因。需在阶段 3 获准后按真实 `task_type`、每次领取/延期/释放记录、队列顺序及活跃槽位关联，区分排队饥饿、容量不足、覆盖不足与其他原因；本次不改调度或重试实现，也不据此进入后续阶段。
+
 ## 8. 后续授权：按 event_id 关联历史重试日志
 
 **结论：日志关联已完成，数据库审计缺失没有被冒称补齐。** 在用户后续授权下，仅重新读取 10-13 `$ART` 的 `media_worker_logs_since_start.txt`、`event_worker_logs_since_start.txt` 和已经获准读取的 `non_materialized_task_details.json`；没有查询历史库、活服务或其他目录。新增证据独立存入 [日志关联目录](evidence/rolling_cache_phase0_20261015/t02_log_correlation_20261015/README.md)，旧证据及旧 `MANIFEST.sha256` 不变。
