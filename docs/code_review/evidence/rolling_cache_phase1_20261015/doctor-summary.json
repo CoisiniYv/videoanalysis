@@ -1,0 +1,161 @@
+{
+  "checks": {
+    "camera_config_exists": true,
+    "camera_config_midterm_only": true,
+    "compose_config_valid": true,
+    "compose_exists": true,
+    "current_smoke_exists": true,
+    "env_evidence_include_legacy_metadata_fields": true,
+    "env_evidence_schema_version": true,
+    "env_evidence_version": true,
+    "env_exists": true,
+    "env_face_confidence_threshold": true,
+    "env_max_fps": true,
+    "env_max_fps_control": false,
+    "env_midterm_only": true,
+    "env_min_fps": true,
+    "env_pose_confidence_threshold": false,
+    "env_pose_infer_interval": true,
+    "env_pose_keypoint_threshold": true,
+    "env_source_id_filter_absent": true,
+    "env_watchlist_threshold": true,
+    "max_parallel_streams_meets_recommended": true,
+    "replay_config_exists": true,
+    "replay_config_midterm_only": false,
+    "root_compose_midterm_only": true,
+    "sources_config_readable": false
+  },
+  "compose_config": {
+    "error": "",
+    "ok": true
+  },
+  "containers_optional": {
+    "clip-worker": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "event-worker": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "evidence-viewer": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "face-worker": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "media-worker": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "redis": {
+      "health": "healthy",
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "replay-service": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "savant": {
+      "health": "healthy",
+      "ok": true,
+      "running": true,
+      "status": "running"
+    },
+    "source-adapter": {
+      "error": "UOS Server 20 1070e\nError: No such object: video-analytics-midterm-source-adapter",
+      "ok": false
+    },
+    "video-file-sink": {
+      "health": null,
+      "ok": true,
+      "running": true,
+      "status": "running"
+    }
+  },
+  "deploy_surface": {
+    "camera_configs": [
+      "cameras.midterm.yml"
+    ],
+    "env_files": [
+      "midterm.env"
+    ],
+    "replay_configs": [
+      "config.midterm.json",
+      "config.midterm.replay-a.json",
+      "config.midterm.replay-b.json",
+      "config.midterm.replay-c.json",
+      "config.midterm.replay-d.json",
+      "config.midterm.replay-e.json",
+      "config.midterm.replay-f.json",
+      "config.midterm.replay-g.json",
+      "config.midterm.replay-h.json"
+    ],
+    "root_compose_files": [
+      "docker-compose.midterm.yml"
+    ]
+  },
+  "env": {
+    "expected": {
+      "EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS": "false",
+      "EVIDENCE_SCHEMA_VERSION": "2.0-midterm",
+      "EVIDENCE_VERSION": "midterm",
+      "FACE_CONFIDENCE_THRESHOLD": "0.50",
+      "MAX_FPS": "8/1",
+      "MAX_FPS_CONTROL": "true",
+      "MIN_FPS": "2/1",
+      "POSE_CONFIDENCE_THRESHOLD": "0.50",
+      "POSE_INFER_INTERVAL": "1",
+      "POSE_KEYPOINT_THRESHOLD": "0.35",
+      "WATCHLIST_THRESHOLD": "0.60"
+    },
+    "values": {
+      "EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS": "false",
+      "EVIDENCE_SCHEMA_VERSION": "2.0-midterm",
+      "EVIDENCE_VERSION": "midterm",
+      "FACE_CONFIDENCE_THRESHOLD": "0.50",
+      "MAX_FPS": "8/1",
+      "MAX_FPS_CONTROL": "false",
+      "MIN_FPS": "2/1",
+      "POSE_CONFIDENCE_THRESHOLD": "0.60",
+      "POSE_INFER_INTERVAL": "1",
+      "POSE_KEYPOINT_THRESHOLD": "0.35",
+      "WATCHLIST_THRESHOLD": "0.60"
+    }
+  },
+  "files": {
+    "camera_config": "modules/savant_security/config/cameras.midterm.yml",
+    "compose": "infra/docker-compose.midterm.yml",
+    "current_smoke": "scripts/smoke/current/check_midterm_deployment.sh",
+    "env": "infra/env/midterm.env",
+    "replay_config": "modules/savant_replay/config.midterm.json",
+    "sources_config": "infra/generated/sources.generated.yml"
+  },
+  "generated_at": "2026-10-15T12:00:01.383266+00:00",
+  "ok": false,
+  "schema_version": "midterm.runtime_doctor.v1",
+  "stream_capacity": {
+    "configured_error": "",
+    "configured_max_parallel_streams": 64,
+    "enabled_rtsp_source_count": 0,
+    "meets_recommended": true,
+    "recommended_max_parallel_streams": 2,
+    "source_count_error": "missing"
+  }
+}

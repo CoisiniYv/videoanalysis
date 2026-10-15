@@ -1,0 +1,111 @@
+Added test nodeids: 164
+......FF................................................................ [ 43%]
+........................................................................ [ 87%]
+....................                                                     [100%]
+=================================== FAILURES ===================================
+_____ test_collector_reads_mode_sinks_and_all_four_pollution_checks[False] _____
+
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-90/test_collector_reads_mode_sink0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10932b230>
+dual = False
+
+    @pytest.mark.parametrize("dual", [False, True])
+    def test_collector_reads_mode_sinks_and_all_four_pollution_checks(tmp_path, monkeypatch, dual):
+        module = _load_module()
+        calls = []
+        queries = []
+        cameras = [{"source_id": "canary_old_00", "site_id": "pressure",
+                    "location": "pressure-00", "enabled": True}]
+    
+        class Connection:
+            def execute(self, query):
+                queries.append(query)
+                return SimpleNamespace(fetchall=lambda: (
+                    [{**cameras[0], "algorithm_id": "behavior.fall"}]
+                    if "camera_rules" in query else cameras))
+    
+        def environment(container):
+            calls.append(container)
+            return {"ROLLING_CACHE_SOURCES": "canary_old_00", "ROLLING_CACHE_RETENTION_SECONDS": "4020"}
+    
+        services = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if dual else ["rolling-cache-sink"]
+        monkeypatch.setattr(module, "docker_container_env", environment)
+        monkeypatch.setattr(module, "_compose_base_args", lambda cfg: ["docker", "compose"])
+        monkeypatch.setattr(module, "_readonly_command", lambda args: SimpleNamespace(
+            returncode=0, stdout=json.dumps({"services": {
+                service: {"environment": {"ROLLING_CACHE_RETENTION_SECONDS": "300"}}
+                for service in [*services, "media-worker"]}})))
+        monkeypatch.setattr(module, "api_json", lambda *args, **kwargs: {"data": {"preflight": {"checks": [
+            {"name": "profile_enabled_source_count", "expected_source_count": 40},
+        ]}}})
+        result = module.collect_baseline_pollution(Connection(), SimpleNamespace(
+            dual_shard_same_gpu=dual, api_base="http://unused", artifact_dir=tmp_path), SimpleNamespace())
+        assert calls == [f"video-analytics-midterm-{service}" for service in [*services, "media-worker"]]
+>       assert {finding["code"] for finding in result["findings"]} == {
+            "historical_pressure_sources", "retention_above_formal",
+            "enabled_pressure_rules", "runtime_camera_count_mismatch",
+        }
+E       AssertionError: assert {'enabled_pre...unt_mismatch'} == {'enabled_pre...unt_mismatch'}
+E         
+E         Extra items in the right set:
+E         'retention_above_formal'
+E         Use -v to get more diff
+
+harness/tests/test_midterm_pressure60_baseline_pollution.py:107: AssertionError
+----------------------------- Captured stderr call -----------------------------
+[31mBASELINE_POLLUTION: see baseline_pollution.json[0m
+_____ test_collector_reads_mode_sinks_and_all_four_pollution_checks[True] ______
+
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-90/test_collector_reads_mode_sink1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10a8f6540>
+dual = True
+
+    @pytest.mark.parametrize("dual", [False, True])
+    def test_collector_reads_mode_sinks_and_all_four_pollution_checks(tmp_path, monkeypatch, dual):
+        module = _load_module()
+        calls = []
+        queries = []
+        cameras = [{"source_id": "canary_old_00", "site_id": "pressure",
+                    "location": "pressure-00", "enabled": True}]
+    
+        class Connection:
+            def execute(self, query):
+                queries.append(query)
+                return SimpleNamespace(fetchall=lambda: (
+                    [{**cameras[0], "algorithm_id": "behavior.fall"}]
+                    if "camera_rules" in query else cameras))
+    
+        def environment(container):
+            calls.append(container)
+            return {"ROLLING_CACHE_SOURCES": "canary_old_00", "ROLLING_CACHE_RETENTION_SECONDS": "4020"}
+    
+        services = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if dual else ["rolling-cache-sink"]
+        monkeypatch.setattr(module, "docker_container_env", environment)
+        monkeypatch.setattr(module, "_compose_base_args", lambda cfg: ["docker", "compose"])
+        monkeypatch.setattr(module, "_readonly_command", lambda args: SimpleNamespace(
+            returncode=0, stdout=json.dumps({"services": {
+                service: {"environment": {"ROLLING_CACHE_RETENTION_SECONDS": "300"}}
+                for service in [*services, "media-worker"]}})))
+        monkeypatch.setattr(module, "api_json", lambda *args, **kwargs: {"data": {"preflight": {"checks": [
+            {"name": "profile_enabled_source_count", "expected_source_count": 40},
+        ]}}})
+        result = module.collect_baseline_pollution(Connection(), SimpleNamespace(
+            dual_shard_same_gpu=dual, api_base="http://unused", artifact_dir=tmp_path), SimpleNamespace())
+        assert calls == [f"video-analytics-midterm-{service}" for service in [*services, "media-worker"]]
+>       assert {finding["code"] for finding in result["findings"]} == {
+            "historical_pressure_sources", "retention_above_formal",
+            "enabled_pressure_rules", "runtime_camera_count_mismatch",
+        }
+E       AssertionError: assert {'enabled_pre...unt_mismatch'} == {'enabled_pre...unt_mismatch'}
+E         
+E         Extra items in the right set:
+E         'retention_above_formal'
+E         Use -v to get more diff
+
+harness/tests/test_midterm_pressure60_baseline_pollution.py:107: AssertionError
+----------------------------- Captured stderr call -----------------------------
+[31mBASELINE_POLLUTION: see baseline_pollution.json[0m
+=========================== short test summary info ============================
+FAILED harness/tests/test_midterm_pressure60_baseline_pollution.py::test_collector_reads_mode_sinks_and_all_four_pollution_checks[False]
+FAILED harness/tests/test_midterm_pressure60_baseline_pollution.py::test_collector_reads_mode_sinks_and_all_four_pollution_checks[True]
+2 failed, 162 passed in 6.64s

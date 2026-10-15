@@ -1,0 +1,335 @@
+{
+  "run_id": "pressure60_phase1_preflight_20261015_r2_rotational",
+  "created_at": "2026-10-15T13:47:27.009990+00:00",
+  "config": {
+    "run_id": "pressure60_phase1_preflight_20261015_r2_rotational",
+    "stream_count": 60,
+    "rtsp_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+    "fps": "4/1",
+    "min_fps": "99/25",
+    "batch_size": 4,
+    "pose_batch_size": 4,
+    "face_detector_batch_size": 4,
+    "face_embedding_batch_size": 16,
+    "face_infer_interval": 3,
+    "face_embedding_infer_interval": 3,
+    "max_parallel_streams": 64,
+    "batched_push_timeout": 40000,
+    "duration_s": 3600,
+    "sample_interval_s": 30,
+    "drain_s": 300,
+    "guard_wait_s": 1200,
+    "keep_evidence": -1,
+    "evidence_group_size": 60,
+    "evidence_policy_groups": [
+      [
+        5,
+        5
+      ]
+    ],
+    "pressure_materialization_event_type_quotas": "",
+    "pressure_disable_evidence_admission": false,
+    "pressure_algorithm_cooldown_s": 60,
+    "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r2/artifacts/pressure60_phase1_preflight_20261015_r2_rotational",
+    "db_url": "<redacted>",
+    "redis_url": "<redacted>",
+    "api_base": "http://127.0.0.1:8090/api/v1",
+    "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r2/infra/docker-compose.midterm.yml",
+    "env_file": "/tmp/pressure60-phase1-preflight-20261015-r2/infra/env/midterm.env",
+    "evidence_root": "/data/video-analytics/media/evidence",
+    "replay_epoch_root": "/data/video-analytics/media/replay-sink-output/midterm/epochs",
+    "force_runtime_restart": false,
+    "no_quiesce_before_guard": false,
+    "rtsp_republish_output_base": "",
+    "rtsp_republish_input_uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+    "rtsp_republish_mode": "copy",
+    "rtsp_republish_local_server": false,
+    "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+    "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+    "rtsp_republish_local_server_gateway": "",
+    "rtsp_republish_local_server_host_port": 18554,
+    "rtsp_republish_warmup_s": 10,
+    "rtsp_republish_readiness_timeout_s": 120,
+    "rtsp_republish_readiness_parallelism": 4,
+    "rtsp_republish_readiness_restart_attempts": 1,
+    "rtsp_republish_input_offset_s": 0,
+    "rtsp_republish_input_offset_step_s": 0,
+    "rtsp_republish_input_loop": false,
+    "rtsp_republish_h264_repeat_headers": false,
+    "max_send_failures": 0,
+    "max_exited_sources": 0,
+    "max_validate_seq_iq": 0,
+    "forwarder_null_sink": false,
+    "dual_shard_same_gpu": true,
+    "dual_shard_api": false,
+    "dual_shard_gpu": "0",
+    "dual_shard_source_mode": "balanced",
+    "evidence_shard_count": 4,
+    "rolling_cache_evidence": true,
+    "rolling_cache_enable_coverage_merge": false,
+    "cleanup": true,
+    "behavior_rules": [],
+    "clear_existing_evidence": false,
+    "discard_pressure_results": false,
+    "rolling_cache_prefill_s": 0,
+    "rolling_cache_postfill_s": 0,
+    "rolling_cache_min_raw_fps": 0,
+    "pressure_source_visibility_timeout_s": 180,
+    "pressure_source_visibility_poll_s": 5,
+    "pressure_source_visibility_stable_samples": 2,
+    "pressure_source_visibility_restart_attempts": 1,
+    "pressure_source_ffmpeg_timeout_ms": 60000,
+    "pressure_source_ffmpeg_init_timeout_ms": 60000,
+    "pressure_source_start_stagger_s": 0.53,
+    "savant_ablation_stage": "full-evidence",
+    "savant_output_mode": "metadata-only",
+    "cpu_isolation_profile": "none",
+    "cuda_mps": false,
+    "mps_savant_active_thread_percentage": 0,
+    "mps_adaface_active_thread_percentage": 0,
+    "adaface_classifier_async": false,
+    "face_secondary_track_id": false,
+    "adaface_input_queue": false,
+    "adaface_crop_resize": false,
+    "adaface_pre_gate": false,
+    "adaface_decoupled": false,
+    "max_adaface_forwarder_send_failure_ratio": 0.005,
+    "adaface_decoupled_sharded": false,
+    "adaface_roi_redis": true,
+    "adaface_roi_batch_timeout_ms": 10,
+    "analysis_max_queue_age_ms": 30000,
+    "media_worker_materialization_max_active": 4,
+    "media_worker_rolling_remux_workers": 1,
+    "media_worker_segment_index_io_concurrency": 2,
+    "media_worker_db_index_io_concurrency": 0,
+    "media_worker_finalizer_workers": 4,
+    "media_worker_finalizer_process_workers": 4,
+    "media_worker_finalizer_queue_capacity": 4,
+    "media_worker_rolling_max_per_poll": 4,
+    "media_worker_completion_wake": true,
+    "pressure_pause_redis_rdb": false,
+    "pressure_tune_postgres_checkpoints": false,
+    "pressure_rolling_cache_host_root": "",
+    "pressure_rolling_cache_materialized_host_root": "",
+    "pressure_rolling_cache_retention_s": 600,
+    "preserve_warmup_results": false,
+    "pressure_sampling_start_event_ts_ms": 0,
+    "pressure_sampling_end_event_ts_ms": 0,
+    "rolling_cache_publication_workers": 1,
+    "rolling_cache_publication_commit_slots": 0,
+    "rolling_cache_publication_final_parent_group_limit": 1,
+    "rolling_cache_publication_file_sync_mode": "fsync",
+    "rolling_cache_publication_metadata_layout": "split",
+    "allow_rotational_rolling_cache": false,
+    "preflight_without_storage_override": true
+  },
+  "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r2/artifacts/pressure60_phase1_preflight_20261015_r2_rotational",
+  "steps": [],
+  "compose_config": {
+    "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r2/infra/docker-compose.midterm.yml",
+    "env_file": "/tmp/pressure60-phase1-preflight-20261015-r2/infra/env/midterm.env",
+    "storage_override": null,
+    "profiles": [
+      "dual-4090-two-source",
+      "rolling-cache-dual"
+    ]
+  },
+  "rolling_cache_storage": {
+    "status": "failed",
+    "compose": {
+      "command": [
+        "docker",
+        "compose",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015-r2/infra/env/midterm.env",
+        "-f",
+        "/tmp/pressure60-phase1-preflight-20261015-r2/infra/docker-compose.midterm.yml",
+        "-f",
+        "/tmp/pressure60-phase1-preflight-20261015-r2/artifacts/pressure60_phase1_preflight_20261015_r2_rotational/compose.dual-shard-same-gpu.override.yml",
+        "--profile",
+        "dual-4090-two-source",
+        "--profile",
+        "rolling-cache-dual",
+        "config",
+        "--format",
+        "json"
+      ],
+      "files": [
+        "/tmp/pressure60-phase1-preflight-20261015-r2/infra/docker-compose.midterm.yml",
+        "/tmp/pressure60-phase1-preflight-20261015-r2/artifacts/pressure60_phase1_preflight_20261015_r2_rotational/compose.dual-shard-same-gpu.override.yml"
+      ],
+      "pressure_tmpfs_override": null,
+      "returncode": 0,
+      "services": {
+        "rolling-cache-sink-a": {
+          "cache_sources": {
+            "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+          }
+        },
+        "rolling-cache-sink-b": {
+          "cache_sources": {
+            "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+          }
+        },
+        "media-worker": {
+          "cache_sources": {
+            "/media/rolling-cache": "/data/video-analytics/media/rolling-cache",
+            "/media/rolling-cache-materialized": "/data/video-analytics/media/rolling-cache-materialized"
+          }
+        },
+        "analysis-forwarder": {
+          "environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "2048"
+          }
+        },
+        "analysis-forwarder-a": {
+          "environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "2048"
+          }
+        },
+        "analysis-forwarder-b": {
+          "environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "2048"
+          }
+        },
+        "replay-raw-fanout": {
+          "environment": {
+            "FORWARDER_QUEUE_MAX_SIZE": "8192"
+          }
+        },
+        "replay-raw-fanout-a": {
+          "environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192"
+          }
+        },
+        "replay-raw-fanout-b": {
+          "environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192"
+          }
+        },
+        "savant-a": {
+          "environment": {
+            "FACE_INFER_INTERVAL": "3",
+            "FACE_EMBEDDING_INFER_INTERVAL": "3"
+          }
+        },
+        "savant-b": {
+          "environment": {
+            "FACE_INFER_INTERVAL": "3",
+            "FACE_EMBEDDING_INFER_INTERVAL": "3"
+          }
+        }
+      }
+    },
+    "input": {
+      "uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+      "command": [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_format",
+        "-show_streams",
+        "-of",
+        "json",
+        "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4"
+      ],
+      "returncode": 0,
+      "bytes_per_second_per_camera": 254168.125,
+      "bitrate_source": "format.bit_rate"
+    },
+    "space_estimates": {
+      "materialized": {
+        "formula": "max_pre_plus_post_seconds * bytes_per_second_per_camera * (max_active + finalizer_queue_capacity) * 1.3",
+        "max_pre_plus_post_seconds": 10,
+        "concurrency": 8,
+        "estimated_bytes": 26433485
+      },
+      "evidence": {
+        "formula": "duration_seconds * camera_count * (2 + behavior_rule_count) / cooldown_seconds * max_pre_plus_post_seconds * bytes_per_second_per_camera * 1.3",
+        "duration_seconds": 3600,
+        "event_type_count": 2,
+        "cooldown_seconds": 60,
+        "estimated_bytes": 23790136500
+      }
+    },
+    "services": {
+      "rolling-cache-sink-a": {
+        "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+      },
+      "rolling-cache-sink-b": {
+        "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+      },
+      "media-worker": {
+        "/media/rolling-cache": "/data/video-analytics/media/rolling-cache",
+        "/media/rolling-cache-materialized": "/data/video-analytics/media/rolling-cache-materialized"
+      }
+    },
+    "paths": [
+      {
+        "path": "/data/video-analytics/media/rolling-cache",
+        "existing_path": "/data/video-analytics/media/rolling-cache",
+        "realpath": "/data/video-analytics/media/rolling-cache",
+        "device": "8:1",
+        "filesystem_type": "ext4",
+        "is_tmpfs": false,
+        "total_bytes": 1967844491264,
+        "available_bytes": 1755102937088,
+        "rotational": true,
+        "device_chain": [
+          {
+            "name": "sda1",
+            "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda/sda1",
+            "partition": true,
+            "parents": [
+              {
+                "name": "sda",
+                "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda",
+                "rotational": true,
+                "transport": null
+              }
+            ]
+          }
+        ],
+        "leaf_devices": [
+          "sda"
+        ],
+        "roles": [
+          "rolling_cache"
+        ],
+        "estimated_additional_bytes": 11895068250
+      }
+    ],
+    "filesystems": [],
+    "errors": [
+      "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache"
+    ],
+    "warnings": [],
+    "allow_rotational": false,
+    "retention_seconds": 600,
+    "camera_count": 60,
+    "bytes_per_second_per_camera": 254168.125,
+    "bitrate_safety_factor": 1.3,
+    "estimated_cache_bytes": 11895068250,
+    "estimated_materialized_bytes": 26433485,
+    "estimated_evidence_bytes": 23790136500,
+    "reason": "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache",
+    "exception_type": "StoragePreflightError"
+  },
+  "status": "preflight_failed",
+  "reason": "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache",
+  "exit_code": 2,
+  "preflight_recovery": {
+    "status": "unchanged",
+    "reason": "aborted_before_any_runtime_or_database_mutation"
+  }
+}

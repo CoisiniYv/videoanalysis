@@ -1,0 +1,3731 @@
+{
+  "started": {
+    "utc": "2026-10-15T13:33:23.523869+00:00",
+    "kst": "2026-10-15T22:33:23.523869+09:00"
+  },
+  "python": "3.7.9 (default, Sep  8 2023, 11:38:57) \n[GCC 7.3.0]",
+  "source_sha256": {
+    "scripts/runtime/run_midterm_pressure60.py": "7ee707b205b03cea42d4a411aff6f8fd8b4372c764032cb6d427fe56403d5dcf",
+    "scripts/runtime/pressure_storage_guard.py": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27",
+    "scripts/runtime/rolling_cache_storage_preflight.py": "103e9a13a629f743e306467827d8be86b8fdfc5014c832145c084a9d9fa85f32",
+    "scripts/runtime/pressure_runtime_readback.py": "d4669ca4a90bfc69519144c823e97a135c95dae535c7a83a41b675922c5cec52",
+    "scripts/runtime/pressure_baseline_guard.py": "a2161310f0454e0e6fab81506b77a9a46e316f0c7d7773ef61046e5ee123968a",
+    "scripts/tools/parse_video_file_sink_pressure.py": "bcd8ac070af9526bf98ee21ba586391aae54317bc4c73e2c3c658d58787bd21a",
+    "libs/evidence_lifecycle/__init__.py": "6ae7aecd5b19b1cf905074e06baa2b007a8067d3f902b6b94295e8809d6a4d19",
+    "libs/evidence_lifecycle/contract.py": "918ce04d25aa46200c2a10c8805c9062e5944a7ab205e704fde80df89a45bf23",
+    "infra/docker-compose.midterm.yml": "e74ac00aa8d93913c2cbc41cb7e7a7ccdec3e35c48163adef4f3a342261c3a38",
+    "infra/midterm-storage.override.yml": "5194c03f262eec72f4325e86f81926f654d0462a6fbc7b4b6a53ea79c259c499",
+    "infra/env/midterm.env": "247b0f79cb4caaacd1d759d97640e788ed46d61a25d951a3b0e55ed8166602fb"
+  },
+  "input": {
+    "path": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+    "sha256": "4920a50af4f052fc6a479519af94ba5b40e683655bd20cbe73a912cadd09dc65"
+  },
+  "snapshot_scope": "Identity/image, stable State fields (not health-log samples), mounts, cpuset, Env digest, compose labels, restart count",
+  "before": [
+    {
+      "id": "a8a63e4ed4265a551b3b742032c2b6a2bc33ca4cf13367eecc97612b96445200",
+      "name": "/video-analytics-midterm-adaface-roi-worker",
+      "image": "sha256:2197771e3f8eb9cd7e6b21ef690b7efa971b85623ce4ed93b0baea14df296c4a",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:51.548832115Z",
+        "FinishedAt": "2026-10-13T00:06:02.26607163Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "5b4c2c29eca94d8e0a849d92df11113947087f05fa49a65d5fdd305ff93f52af",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "e3e43fca89eb1be1bb6a2f8348c43447d1351952702c1ca90ad69831a6fe1482",
+      "name": "/video-analytics-midterm-analysis-forwarder",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3955,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.213876058Z",
+        "FinishedAt": "2026-10-13T02:03:45.889458786Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "34e4729446eb50c651ea65e97d55d9359f301b95ae447aad20fa8bfe453d78fd",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "7e5306e0ea60a28f2111db5a3ba5b70059be3b70a63648f10ca7a0febfa139e5",
+      "name": "/video-analytics-midterm-analysis-forwarder-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "created",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "ee66d97c191eecddabb202621ca68bfcdb465efbfd3128b88669a794475da1ad",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "0762dec4a8fd69be528286876fd90e8bc375609584542c8d5fe0006854632356",
+      "name": "/video-analytics-midterm-analysis-forwarder-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "created",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "f0a8fd6fc3329c6bc5c33a9c4be5b831482c96ecc939282897af491466f2ead3",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "fa07af6a41077f133f28c99effe35d8e8965c386bb7a1b0cf3f2d608b2df3a2b",
+      "name": "/video-analytics-midterm-api",
+      "image": "sha256:19648e5fa425b4607089ebdddd6a9c3e44065f8fa66fb314da63802969ef8dc6",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3470,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.716518663Z",
+        "FinishedAt": "2026-10-13T02:03:46.431530752Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/api",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/app/modules/savant_security",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/face_trajectory_cache",
+          "Destination": "/data/video-analytics/media/face_trajectory_cache",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models-savant-b",
+          "Destination": "/data/video-analytics/models-savant-b",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/var/run/docker.sock",
+          "Destination": "/var/run/docker.sock",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1996a94ba311d8574f254b92703d5fcfcf9c62f3264500f21e27a8f64ca6bd63",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml,/home/user/video-analytics/infra/main-integration.private.override.yml"
+    },
+    {
+      "id": "a010c7e021809c9437748aa4abe9b078be75d1be4d88bc6283c521aea4c7c7f4",
+      "name": "/video-analytics-midterm-clip-worker",
+      "image": "sha256:12bdd5100ea86b13a0274b33db2eb178191f0b1b6ca21b7e01e189800e8a9e1a",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4600,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.682639225Z",
+        "FinishedAt": "2026-10-15T09:44:54.952140311Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/clip-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "906dcc28bf2abc255c9b174bc8a6dd47a54241f8c1b31b35b49051e5eeed87bc",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "acfd0be36deeccebe5a6babf4bee8650cec52b74606d9331f3eeb4013738c06a",
+      "name": "/video-analytics-midterm-cuda-mps-operator",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:54:50.696197915Z",
+        "FinishedAt": "2026-07-15T15:13:34.378267085Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "407468a60458f79756ecc81d079dd12ce29f20d96d5a1e4b2e579d7274b8d349",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "ae1e5ddd4bb34e6f725b4bfb919c06b51858f1f4ed987c690fc8a77e94c6017f",
+      "name": "/video-analytics-midterm-event-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4576,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.686211632Z",
+        "FinishedAt": "2026-10-15T09:44:53.891129557Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "215a4a378b1260410a36dd1b3d3200cc4a3ff24680799fe46c59241576c93a0a",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_event_worker_evidence_admission.override.yml"
+    },
+    {
+      "id": "53a1b55ea0faaba73b27fa9fc6be7a4a53484fb1300b1213f0271bb2da4b3dda",
+      "name": "/video-analytics-midterm-evidence-viewer",
+      "image": "sha256:2cb88aee7ee5a7d764fd6a2beca2cf33ef373cb955860ebdddf1726d232cb7c0",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3157,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.44921354Z",
+        "FinishedAt": "2026-10-15T09:44:46.101564984Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/evidence-viewer",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/app/modules/savant_security/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/evidence",
+          "Destination": "/evidence",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f960c3693a5fe3e15ed9fae70e65e7c9435bd4ad3eb7ad7a033eb878c71e6372",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml,/home/user/video-analytics/infra/main-integration.private.override.yml"
+    },
+    {
+      "id": "3d9d4dcf842d2c0c52f987973c432e13f41036cec571abb2e39eab59405b6bf0",
+      "name": "/video-analytics-midterm-face-worker",
+      "image": "sha256:7be0bd8d4c1e9e71b115275bd02ffef9f29fe7b0e9f6278b96806fdad71befe0",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4451,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.182933634Z",
+        "FinishedAt": "2026-10-15T09:44:54.30142804Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/face-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/face_trajectories",
+          "Destination": "/data/video-analytics/media/face_trajectories",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "6,14",
+      "environment_sha256": "5a28176bc3685bb991c2a68bdb395d2dae9ec661a2d2acda37db5a04afcf7d1e",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "6e2cc8f01f5ad4e195a0d9fa01dc022155228a13ab4024a459780f471b58a7cd",
+      "name": "/video-analytics-midterm-media-worker",
+      "image": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4601,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.663775262Z",
+        "FinishedAt": "2026-10-15T09:44:55.151095456Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/media-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/opt/savant/src/module/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f78eaa30eab190bb6615fae54523924f83cd5377d2bfec39a2694067619676de",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_media_worker_rolling_cache.override.yml"
+    },
+    {
+      "id": "18ee0f1f609bbb17b2829f7c88030a43fee1ae2cdf2707db2b405f969223c916",
+      "name": "/video-analytics-midterm-person-observation-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4410,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.023575474Z",
+        "FinishedAt": "2026-10-15T09:44:54.560689448Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "15",
+      "environment_sha256": "0eddbf3e97c59613f8aeefcc69c75b45cb833f701f005130f0c7ded4388f1b9d",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "48325468f085f049bef9ece4fdbfd57f35566d8646d2aef373476190d328d34a",
+      "name": "/video-analytics-midterm-postgres",
+      "image": "sha256:b295c2aa92725ecaaa58ffb6664035b45076318d8ca93ae4a9b0994481862f7d",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3680,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:50.372001744Z",
+        "FinishedAt": "2026-10-13T02:03:45.881407092Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/db/migrations",
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/postgres-midterm",
+          "Destination": "/var/lib/postgresql/data",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b6198c5575aeba64ca9aae6f9bb5625ee743e327a799c0f6aed7bd7f3457d93f",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "5c6da50a69f516eeb08fe44e5461deaeb43d5df92240e016689e841d79a46ce8",
+      "name": "/video-analytics-midterm-redis",
+      "image": "sha256:487efc0616382465781b8fdc3d6d1db449e6fd80ae23bf48432a2da6b6929908",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2962,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.206203271Z",
+        "FinishedAt": "2026-10-15T09:44:46.101708692Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b",
+          "Source": "/home/docker-data/volumes/43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b0d41ad25e5eaaf314ea86e631a7364d75aa3f7efab4ce94c92a603f2d55b3b7",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "1989d78d4eb9d7c47de1e80c5d12f386e398c15ee31dc73f9ee297314a32c6ad",
+      "name": "/video-analytics-midterm-replay-a",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:20.695641351Z",
+        "FinishedAt": "2026-07-15T15:13:05.539015878Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-a.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-a",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "c0ba0b6ff043ad1ec2ce85d0fe84ed83fa4117ef1bd53d27acbbfa17c1ae6ea3",
+      "name": "/video-analytics-midterm-replay-b",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:36.415039661Z",
+        "FinishedAt": "2026-07-15T15:13:16.119299936Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-b.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-b",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "60370a9fcc86a95f555618d805325d3c88438958dc8ff28ddf98fef4fefee2e4",
+      "name": "/video-analytics-midterm-replay-raw-fanout",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2904,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:47.723401886Z",
+        "FinishedAt": "2026-10-13T02:03:46.160051236Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7979108ff20f5b949c6293332f04f5a2c248573755b5b92f22da1e191aecc346",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "5b58872659ce461f6d294189cf7f0ba78917bcda0f2b9e45a6adee2d9ffdd9bc",
+      "name": "/video-analytics-midterm-replay-raw-fanout-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 1,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:54.0228586Z",
+        "FinishedAt": "2026-10-13T00:06:01.189407304Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7e64c6cb1f2f7759a0245bdd00d7e4540732fceca0ebe54568969531eb0f7971",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "bc66e5ceb995ddd24abe70036eca1a2af91589b26a8fe8975af4233feba0f646",
+      "name": "/video-analytics-midterm-replay-raw-fanout-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 1,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:54.115196424Z",
+        "FinishedAt": "2026-10-13T00:06:01.287326789Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "5e61ec525142f8c37816c9a61ff335360d3bd6585add080d989039adbc96f39a",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "32f6d762f388c875da2794a81a951ae1bff881e2c6cf08e36a179b8beae41256",
+      "name": "/video-analytics-midterm-replay-service",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2847,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:47.521379865Z",
+        "FinishedAt": "2026-10-15T09:44:46.101547285Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "fd1763770f14fdb65e1d4f043f6b90cb7706025298cb7932a2f56d768b66bd3b",
+      "name": "/video-analytics-midterm-rolling-cache-sink-a",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3940,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.900981539Z",
+        "FinishedAt": "2026-10-13T02:03:46.019051294Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "574ffa72e925b0a40f3f7f6256150efa4de2405f03a133da0d016aa68cb088a1",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "1312a9ce9d2c58ea44c9aa924ab74a2cb45fda6a4d1a5584e7bf730d953cb4b3",
+      "name": "/video-analytics-midterm-rolling-cache-sink-b",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3947,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.242987935Z",
+        "FinishedAt": "2026-10-13T02:03:46.068356864Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "10913d18fda0d865eab89b9b495b871870444baa3320bf906585fd0c610f9ea6",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "4bac0d99faecb750c42a828677a74708625eaef6e7bd1cc656518ab1e69c4690",
+      "name": "/video-analytics-midterm-savant",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3953,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:55.352024681Z",
+        "FinishedAt": "2026-10-13T02:03:47.599026882Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "eab29313314f8411820518018982b1eaa4885453767da46235d11d02529e4b35",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "f3bfc6356a808cd1cdddc4bee156fd3b6c60cd986fb0425caf52c222731a60d4",
+      "name": "/video-analytics-midterm-savant-a",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:52.405152424Z",
+        "FinishedAt": "2026-10-13T00:06:04.831772132Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "67d9b62b275b67502ff5bc19e3c05e204c7c5793efdd479ec85e6c79ae1e4d3f",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "c2486f6c7d57528658073a4a16c13deed5c4fcea0241f60c221f5c79afdfcd79",
+      "name": "/video-analytics-midterm-savant-b",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:53.502593967Z",
+        "FinishedAt": "2026-10-13T00:06:05.814522762Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "cf942fa0eeab962908f7433e1d9fc981da41a6a7225917f698fc14207f9ae569",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "fbe544ecada3e0883f7ada33f2e720e07b2f144514429dbea2e69badd24ae8cb",
+      "name": "/video-analytics-midterm-video-file-sink",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3728,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:50.367946335Z",
+        "FinishedAt": "2026-10-13T02:03:45.879593435Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "5b1ed1a1b53e814fbd40fd61cbfbf67d9970f39b39f3963fbf60901d157d1e3b",
+      "working_dir": null,
+      "config_files": null
+    },
+    {
+      "id": "7c34133138b43b4812a8107c0811524ce6136dc8e8f3a52fb5827dbedf2e8766",
+      "name": "/video-analytics-midterm-video-file-sink-a",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:21.068305289Z",
+        "FinishedAt": "2026-07-15T15:13:22.389307333Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b8172457b5beeb6458c782f2cbc20e89c7d7214ed9fd5d254a497004bf7671ac",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "82e8a1237241b2c14e261bf275e268ab93e9cd2212fc66dfb2af9114a1ade294",
+      "name": "/video-analytics-midterm-video-file-sink-b",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:36.795203673Z",
+        "FinishedAt": "2026-07-15T15:13:23.038873551Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "6edefbef793f2cbce572fadd2a23fef75e4bd36137c4229ae48d88d33d5cf2e3",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "e445e6cbdb486e5bcbdfa01fb50147ebb848c935b4ec1a038ffb216d9eff50df",
+      "name": "/video-analytics-midterm-video-file-sink-pressure-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-10-09T16:57:44.473272552Z",
+        "FinishedAt": "2026-10-09T17:02:26.517665139Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "25ad5200e8062d9d0def27ea9c16c28beafb80c6aabc786c4c2c985e2525c647",
+      "working_dir": null,
+      "config_files": null
+    },
+    {
+      "id": "61c145125bf6aae7e58c3e8af796e0db6f356461dfc3fe7834c7b6f453b7687c",
+      "name": "/video-analytics-midterm-video-file-sink-pressure1h-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-10-09T19:18:32.504261755Z",
+        "FinishedAt": "2026-10-09T19:21:11.517842028Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1faecbd5e16d521f4a543404dc13931e1605e2d240eeef0c0898a1b521f5daf0",
+      "working_dir": null,
+      "config_files": null
+    }
+  ],
+  "rounds": [
+    {
+      "label": "nvme",
+      "argv": [
+        "/usr/bin/python3",
+        "scripts/runtime/run_midterm_pressure60.py",
+        "--preflight-only",
+        "--compose-file",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+        "--artifact-root",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts",
+        "--dual-shard-same-gpu",
+        "--rolling-cache-evidence",
+        "--streams",
+        "60",
+        "--fps",
+        "4/1",
+        "--min-fps",
+        "99/25",
+        "--duration-s",
+        "3600",
+        "--drain-s",
+        "300",
+        "--pressure-rolling-cache-retention-s",
+        "600",
+        "--evidence-policy-groups",
+        "5:5",
+        "--evidence-group-size",
+        "60",
+        "--pressure-algorithm-cooldown-s",
+        "60",
+        "--media-worker-materialization-max-active",
+        "4",
+        "--media-worker-finalizer-workers",
+        "4",
+        "--media-worker-finalizer-queue-capacity",
+        "4",
+        "--media-worker-rolling-remux-workers",
+        "1",
+        "--face-infer-interval",
+        "3",
+        "--face-embedding-infer-interval",
+        "3",
+        "--analysis-max-queue-age-ms",
+        "30000",
+        "--adaface-roi-redis",
+        "--savant-output-mode",
+        "metadata-only",
+        "--rtsp-republish-input-uri",
+        "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+        "--run-id",
+        "pressure60_phase1_preflight_20261015_r1_nvme"
+      ],
+      "cwd": "/tmp/pressure60-phase1-preflight-20261015-r1",
+      "started": {
+        "utc": "2026-10-15T13:33:23.592525+00:00",
+        "kst": "2026-10-15T22:33:23.592525+09:00"
+      },
+      "expected_returncode": 0,
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "report_path": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_nvme/report.json",
+      "report": {
+        "run_id": "pressure60_phase1_preflight_20261015_r1_nvme",
+        "created_at": "2026-10-15T13:33:23.999784+00:00",
+        "config": {
+          "run_id": "pressure60_phase1_preflight_20261015_r1_nvme",
+          "stream_count": 60,
+          "rtsp_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+          "fps": "4/1",
+          "min_fps": "99/25",
+          "batch_size": 4,
+          "pose_batch_size": 4,
+          "face_detector_batch_size": 4,
+          "face_embedding_batch_size": 16,
+          "face_infer_interval": 3,
+          "face_embedding_infer_interval": 3,
+          "max_parallel_streams": 64,
+          "batched_push_timeout": 40000,
+          "duration_s": 3600,
+          "sample_interval_s": 30,
+          "drain_s": 300,
+          "guard_wait_s": 1200,
+          "keep_evidence": -1,
+          "evidence_group_size": 60,
+          "evidence_policy_groups": [
+            [
+              5,
+              5
+            ]
+          ],
+          "pressure_materialization_event_type_quotas": "",
+          "pressure_disable_evidence_admission": false,
+          "pressure_algorithm_cooldown_s": 60,
+          "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_nvme",
+          "db_url": "<redacted>",
+          "redis_url": "<redacted>",
+          "api_base": "http://127.0.0.1:8090/api/v1",
+          "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+          "env_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+          "evidence_root": "/data/video-analytics/media/evidence",
+          "replay_epoch_root": "/data/video-analytics/media/replay-sink-output/midterm/epochs",
+          "force_runtime_restart": false,
+          "no_quiesce_before_guard": false,
+          "rtsp_republish_output_base": "",
+          "rtsp_republish_input_uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+          "rtsp_republish_mode": "copy",
+          "rtsp_republish_local_server": false,
+          "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+          "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+          "rtsp_republish_local_server_gateway": "",
+          "rtsp_republish_local_server_host_port": 18554,
+          "rtsp_republish_warmup_s": 10,
+          "rtsp_republish_readiness_timeout_s": 120,
+          "rtsp_republish_readiness_parallelism": 4,
+          "rtsp_republish_readiness_restart_attempts": 1,
+          "rtsp_republish_input_offset_s": 0,
+          "rtsp_republish_input_offset_step_s": 0,
+          "rtsp_republish_input_loop": false,
+          "rtsp_republish_h264_repeat_headers": false,
+          "max_send_failures": 0,
+          "max_exited_sources": 0,
+          "max_validate_seq_iq": 0,
+          "forwarder_null_sink": false,
+          "dual_shard_same_gpu": true,
+          "dual_shard_api": false,
+          "dual_shard_gpu": "0",
+          "dual_shard_source_mode": "balanced",
+          "evidence_shard_count": 4,
+          "rolling_cache_evidence": true,
+          "rolling_cache_enable_coverage_merge": false,
+          "cleanup": true,
+          "behavior_rules": [],
+          "clear_existing_evidence": false,
+          "discard_pressure_results": false,
+          "rolling_cache_prefill_s": 0,
+          "rolling_cache_postfill_s": 0,
+          "rolling_cache_min_raw_fps": 0,
+          "pressure_source_visibility_timeout_s": 180,
+          "pressure_source_visibility_poll_s": 5,
+          "pressure_source_visibility_stable_samples": 2,
+          "pressure_source_visibility_restart_attempts": 1,
+          "pressure_source_ffmpeg_timeout_ms": 60000,
+          "pressure_source_ffmpeg_init_timeout_ms": 60000,
+          "pressure_source_start_stagger_s": 0.53,
+          "savant_ablation_stage": "full-evidence",
+          "savant_output_mode": "metadata-only",
+          "cpu_isolation_profile": "none",
+          "cuda_mps": false,
+          "mps_savant_active_thread_percentage": 0,
+          "mps_adaface_active_thread_percentage": 0,
+          "adaface_classifier_async": false,
+          "face_secondary_track_id": false,
+          "adaface_input_queue": false,
+          "adaface_crop_resize": false,
+          "adaface_pre_gate": false,
+          "adaface_decoupled": false,
+          "max_adaface_forwarder_send_failure_ratio": 0.005,
+          "adaface_decoupled_sharded": false,
+          "adaface_roi_redis": true,
+          "adaface_roi_batch_timeout_ms": 10,
+          "analysis_max_queue_age_ms": 30000,
+          "media_worker_materialization_max_active": 4,
+          "media_worker_rolling_remux_workers": 1,
+          "media_worker_segment_index_io_concurrency": 2,
+          "media_worker_db_index_io_concurrency": 0,
+          "media_worker_finalizer_workers": 4,
+          "media_worker_finalizer_process_workers": 4,
+          "media_worker_finalizer_queue_capacity": 4,
+          "media_worker_rolling_max_per_poll": 4,
+          "media_worker_completion_wake": true,
+          "pressure_pause_redis_rdb": false,
+          "pressure_tune_postgres_checkpoints": false,
+          "pressure_rolling_cache_host_root": "",
+          "pressure_rolling_cache_materialized_host_root": "",
+          "pressure_rolling_cache_retention_s": 600,
+          "preserve_warmup_results": false,
+          "pressure_sampling_start_event_ts_ms": 0,
+          "pressure_sampling_end_event_ts_ms": 0,
+          "rolling_cache_publication_workers": 1,
+          "rolling_cache_publication_commit_slots": 0,
+          "rolling_cache_publication_final_parent_group_limit": 1,
+          "rolling_cache_publication_file_sync_mode": "fsync",
+          "rolling_cache_publication_metadata_layout": "split",
+          "allow_rotational_rolling_cache": false,
+          "preflight_without_storage_override": false
+        },
+        "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_nvme",
+        "steps": [],
+        "compose_config": {
+          "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+          "env_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+          "storage_override": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/midterm-storage.override.yml",
+          "profiles": [
+            "dual-4090-two-source",
+            "rolling-cache-dual"
+          ]
+        },
+        "rolling_cache_storage": {
+          "status": "passed",
+          "compose": {
+            "command": [
+              "docker",
+              "compose",
+              "--env-file",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+              "-f",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+              "-f",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/midterm-storage.override.yml",
+              "-f",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_nvme/compose.dual-shard-same-gpu.override.yml",
+              "--profile",
+              "dual-4090-two-source",
+              "--profile",
+              "rolling-cache-dual",
+              "config",
+              "--format",
+              "json"
+            ],
+            "files": [
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/midterm-storage.override.yml",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_nvme/compose.dual-shard-same-gpu.override.yml"
+            ],
+            "pressure_tmpfs_override": null,
+            "returncode": 0,
+            "services": {
+              "rolling-cache-sink-a": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache"
+                }
+              },
+              "rolling-cache-sink-b": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache"
+                }
+              },
+              "media-worker": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache",
+                  "/media/rolling-cache-materialized": "/home/user/video-analytics-fast/rolling-cache-materialized"
+                }
+              },
+              "analysis-forwarder": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "analysis-forwarder-a": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "analysis-forwarder-b": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "replay-raw-fanout": {
+                "environment": {
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "replay-raw-fanout-a": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "replay-raw-fanout-b": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "savant-a": {
+                "environment": {
+                  "FACE_INFER_INTERVAL": "3",
+                  "FACE_EMBEDDING_INFER_INTERVAL": "3"
+                }
+              },
+              "savant-b": {
+                "environment": {
+                  "FACE_INFER_INTERVAL": "3",
+                  "FACE_EMBEDDING_INFER_INTERVAL": "3"
+                }
+              }
+            }
+          },
+          "input": {
+            "uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+            "command": [
+              "ffprobe",
+              "-v",
+              "error",
+              "-show_format",
+              "-show_streams",
+              "-of",
+              "json",
+              "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4"
+            ],
+            "returncode": 0,
+            "bytes_per_second_per_camera": 254168.125,
+            "bitrate_source": "format.bit_rate"
+          },
+          "space_estimates": {
+            "materialized": {
+              "formula": "max_pre_plus_post_seconds * bytes_per_second_per_camera * (max_active + finalizer_queue_capacity) * 1.3",
+              "max_pre_plus_post_seconds": 10,
+              "concurrency": 8,
+              "estimated_bytes": 26433485
+            },
+            "evidence": {
+              "formula": "duration_seconds * camera_count * (2 + behavior_rule_count) / cooldown_seconds * max_pre_plus_post_seconds * bytes_per_second_per_camera * 1.3",
+              "duration_seconds": 3600,
+              "event_type_count": 2,
+              "cooldown_seconds": 60,
+              "estimated_bytes": 23790136500
+            }
+          },
+          "services": {
+            "rolling-cache-sink-a": {
+              "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache"
+            },
+            "rolling-cache-sink-b": {
+              "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache"
+            },
+            "media-worker": {
+              "/media/rolling-cache": "/home/user/video-analytics-fast/rolling-cache",
+              "/media/rolling-cache-materialized": "/home/user/video-analytics-fast/rolling-cache-materialized"
+            }
+          },
+          "paths": [
+            {
+              "path": "/home/user/video-analytics-fast/rolling-cache",
+              "existing_path": "/home/user/video-analytics-fast/rolling-cache",
+              "realpath": "/home/user/video-analytics-fast/rolling-cache",
+              "device": "253:2",
+              "filesystem_type": "xfs",
+              "is_tmpfs": false,
+              "total_bytes": 406288297984,
+              "available_bytes": 311967211520,
+              "rotational": false,
+              "device_chain": [
+                {
+                  "name": "dm-2",
+                  "sysfs_path": "/sys/devices/virtual/block/dm-2",
+                  "slaves": [
+                    {
+                      "name": "nvme0n1p3",
+                      "sysfs_path": "/sys/devices/pci0000:00/0000:00:03.1/0000:06:00.0/nvme/nvme0/nvme0n1/nvme0n1p3",
+                      "partition": true,
+                      "parents": [
+                        {
+                          "name": "nvme0n1",
+                          "sysfs_path": "/sys/devices/pci0000:00/0000:00:03.1/0000:06:00.0/nvme/nvme0/nvme0n1",
+                          "rotational": false,
+                          "transport": "nvme"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "leaf_devices": [
+                "nvme0n1"
+              ],
+              "roles": [
+                "rolling_cache"
+              ],
+              "estimated_additional_bytes": 11895068250
+            },
+            {
+              "path": "/home/user/video-analytics-fast/rolling-cache-materialized",
+              "existing_path": "/home/user/video-analytics-fast/rolling-cache-materialized",
+              "realpath": "/home/user/video-analytics-fast/rolling-cache-materialized",
+              "device": "253:2",
+              "filesystem_type": "xfs",
+              "is_tmpfs": false,
+              "total_bytes": 406288297984,
+              "available_bytes": 311967211520,
+              "rotational": false,
+              "device_chain": [
+                {
+                  "name": "dm-2",
+                  "sysfs_path": "/sys/devices/virtual/block/dm-2",
+                  "slaves": [
+                    {
+                      "name": "nvme0n1p3",
+                      "sysfs_path": "/sys/devices/pci0000:00/0000:00:03.1/0000:06:00.0/nvme/nvme0/nvme0n1/nvme0n1p3",
+                      "partition": true,
+                      "parents": [
+                        {
+                          "name": "nvme0n1",
+                          "sysfs_path": "/sys/devices/pci0000:00/0000:00:03.1/0000:06:00.0/nvme/nvme0/nvme0n1",
+                          "rotational": false,
+                          "transport": "nvme"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "leaf_devices": [
+                "nvme0n1"
+              ],
+              "roles": [
+                "materialized"
+              ],
+              "estimated_additional_bytes": 26433485
+            },
+            {
+              "path": "/data/video-analytics/media/evidence",
+              "existing_path": "/data/video-analytics/media/evidence",
+              "realpath": "/data/video-analytics/media/evidence",
+              "device": "8:1",
+              "filesystem_type": "ext4",
+              "is_tmpfs": false,
+              "total_bytes": 1967844491264,
+              "available_bytes": 1755102937088,
+              "rotational": true,
+              "device_chain": [
+                {
+                  "name": "sda1",
+                  "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda/sda1",
+                  "partition": true,
+                  "parents": [
+                    {
+                      "name": "sda",
+                      "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda",
+                      "rotational": true,
+                      "transport": null
+                    }
+                  ]
+                }
+              ],
+              "leaf_devices": [
+                "sda"
+              ],
+              "roles": [
+                "evidence"
+              ],
+              "estimated_additional_bytes": 23790136500
+            },
+            {
+              "path": "/data",
+              "existing_path": "/data",
+              "realpath": "/data",
+              "device": "8:1",
+              "filesystem_type": "ext4",
+              "is_tmpfs": false,
+              "total_bytes": 1967844491264,
+              "available_bytes": 1755102937088,
+              "rotational": true,
+              "device_chain": [
+                {
+                  "name": "sda1",
+                  "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda/sda1",
+                  "partition": true,
+                  "parents": [
+                    {
+                      "name": "sda",
+                      "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda",
+                      "rotational": true,
+                      "transport": null
+                    }
+                  ]
+                }
+              ],
+              "leaf_devices": [
+                "sda"
+              ],
+              "roles": [
+                "data"
+              ],
+              "estimated_additional_bytes": 0
+            },
+            {
+              "path": "/dev/shm",
+              "existing_path": "/dev/shm",
+              "realpath": "/dev/shm",
+              "device": "0:21",
+              "filesystem_type": "tmpfs",
+              "is_tmpfs": true,
+              "total_bytes": 16413777920,
+              "available_bytes": 16413777920,
+              "rotational": null,
+              "device_chain": [],
+              "leaf_devices": [],
+              "roles": [
+                "shm"
+              ],
+              "estimated_additional_bytes": 0
+            }
+          ],
+          "filesystems": [
+            {
+              "device": "253:2",
+              "filesystem_type": "xfs",
+              "total_bytes": 406288297984,
+              "available_bytes": 311967211520,
+              "paths": [
+                "/home/user/video-analytics-fast/rolling-cache",
+                "/home/user/video-analytics-fast/rolling-cache-materialized"
+              ],
+              "roles": [
+                "rolling_cache",
+                "materialized"
+              ],
+              "estimated_additional_bytes": 11921501735,
+              "minimum_remaining_fraction": 0.2,
+              "estimated_remaining_bytes": 300045709785,
+              "estimated_remaining_fraction": 0.7385044345944123
+            },
+            {
+              "device": "8:1",
+              "filesystem_type": "ext4",
+              "total_bytes": 1967844491264,
+              "available_bytes": 1755102937088,
+              "paths": [
+                "/data/video-analytics/media/evidence",
+                "/data"
+              ],
+              "roles": [
+                "evidence",
+                "data"
+              ],
+              "estimated_additional_bytes": 23790136500,
+              "minimum_remaining_fraction": 0,
+              "estimated_remaining_bytes": 1731312800588,
+              "estimated_remaining_fraction": 0.8798016348720374
+            },
+            {
+              "device": "0:21",
+              "filesystem_type": "tmpfs",
+              "total_bytes": 16413777920,
+              "available_bytes": 16413777920,
+              "paths": [
+                "/dev/shm"
+              ],
+              "roles": [
+                "shm"
+              ],
+              "estimated_additional_bytes": 0,
+              "minimum_remaining_fraction": 0,
+              "estimated_remaining_bytes": 16413777920,
+              "estimated_remaining_fraction": 1
+            }
+          ],
+          "errors": [],
+          "warnings": [],
+          "allow_rotational": false,
+          "retention_seconds": 600,
+          "camera_count": 60,
+          "bytes_per_second_per_camera": 254168.125,
+          "bitrate_safety_factor": 1.3,
+          "estimated_cache_bytes": 11895068250,
+          "estimated_materialized_bytes": 26433485,
+          "estimated_evidence_bytes": 23790136500,
+          "reason": "passed"
+        },
+        "status": "preflight_passed",
+        "reason": "passed"
+      },
+      "completed": {
+        "utc": "2026-10-15T13:33:24.480539+00:00",
+        "kst": "2026-10-15T22:33:24.480539+09:00"
+      },
+      "expectation_met": true
+    },
+    {
+      "label": "rotational",
+      "argv": [
+        "/usr/bin/python3",
+        "scripts/runtime/run_midterm_pressure60.py",
+        "--preflight-only",
+        "--compose-file",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+        "--artifact-root",
+        "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts",
+        "--dual-shard-same-gpu",
+        "--rolling-cache-evidence",
+        "--streams",
+        "60",
+        "--fps",
+        "4/1",
+        "--min-fps",
+        "99/25",
+        "--duration-s",
+        "3600",
+        "--drain-s",
+        "300",
+        "--pressure-rolling-cache-retention-s",
+        "600",
+        "--evidence-policy-groups",
+        "5:5",
+        "--evidence-group-size",
+        "60",
+        "--pressure-algorithm-cooldown-s",
+        "60",
+        "--media-worker-materialization-max-active",
+        "4",
+        "--media-worker-finalizer-workers",
+        "4",
+        "--media-worker-finalizer-queue-capacity",
+        "4",
+        "--media-worker-rolling-remux-workers",
+        "1",
+        "--face-infer-interval",
+        "3",
+        "--face-embedding-infer-interval",
+        "3",
+        "--analysis-max-queue-age-ms",
+        "30000",
+        "--adaface-roi-redis",
+        "--savant-output-mode",
+        "metadata-only",
+        "--rtsp-republish-input-uri",
+        "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+        "--run-id",
+        "pressure60_phase1_preflight_20261015_r1_rotational",
+        "--preflight-without-storage-override"
+      ],
+      "cwd": "/tmp/pressure60-phase1-preflight-20261015-r1",
+      "started": {
+        "utc": "2026-10-15T13:33:24.484217+00:00",
+        "kst": "2026-10-15T22:33:24.484217+09:00"
+      },
+      "expected_returncode": 2,
+      "returncode": 2,
+      "stdout": "",
+      "stderr": "",
+      "report_path": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_rotational/report.json",
+      "report": {
+        "run_id": "pressure60_phase1_preflight_20261015_r1_rotational",
+        "created_at": "2026-10-15T13:33:24.905128+00:00",
+        "config": {
+          "run_id": "pressure60_phase1_preflight_20261015_r1_rotational",
+          "stream_count": 60,
+          "rtsp_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+          "fps": "4/1",
+          "min_fps": "99/25",
+          "batch_size": 4,
+          "pose_batch_size": 4,
+          "face_detector_batch_size": 4,
+          "face_embedding_batch_size": 16,
+          "face_infer_interval": 3,
+          "face_embedding_infer_interval": 3,
+          "max_parallel_streams": 64,
+          "batched_push_timeout": 40000,
+          "duration_s": 3600,
+          "sample_interval_s": 30,
+          "drain_s": 300,
+          "guard_wait_s": 1200,
+          "keep_evidence": -1,
+          "evidence_group_size": 60,
+          "evidence_policy_groups": [
+            [
+              5,
+              5
+            ]
+          ],
+          "pressure_materialization_event_type_quotas": "",
+          "pressure_disable_evidence_admission": false,
+          "pressure_algorithm_cooldown_s": 60,
+          "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_rotational",
+          "db_url": "<redacted>",
+          "redis_url": "<redacted>",
+          "api_base": "http://127.0.0.1:8090/api/v1",
+          "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+          "env_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+          "evidence_root": "/data/video-analytics/media/evidence",
+          "replay_epoch_root": "/data/video-analytics/media/replay-sink-output/midterm/epochs",
+          "force_runtime_restart": false,
+          "no_quiesce_before_guard": false,
+          "rtsp_republish_output_base": "",
+          "rtsp_republish_input_uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+          "rtsp_republish_mode": "copy",
+          "rtsp_republish_local_server": false,
+          "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+          "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+          "rtsp_republish_local_server_gateway": "",
+          "rtsp_republish_local_server_host_port": 18554,
+          "rtsp_republish_warmup_s": 10,
+          "rtsp_republish_readiness_timeout_s": 120,
+          "rtsp_republish_readiness_parallelism": 4,
+          "rtsp_republish_readiness_restart_attempts": 1,
+          "rtsp_republish_input_offset_s": 0,
+          "rtsp_republish_input_offset_step_s": 0,
+          "rtsp_republish_input_loop": false,
+          "rtsp_republish_h264_repeat_headers": false,
+          "max_send_failures": 0,
+          "max_exited_sources": 0,
+          "max_validate_seq_iq": 0,
+          "forwarder_null_sink": false,
+          "dual_shard_same_gpu": true,
+          "dual_shard_api": false,
+          "dual_shard_gpu": "0",
+          "dual_shard_source_mode": "balanced",
+          "evidence_shard_count": 4,
+          "rolling_cache_evidence": true,
+          "rolling_cache_enable_coverage_merge": false,
+          "cleanup": true,
+          "behavior_rules": [],
+          "clear_existing_evidence": false,
+          "discard_pressure_results": false,
+          "rolling_cache_prefill_s": 0,
+          "rolling_cache_postfill_s": 0,
+          "rolling_cache_min_raw_fps": 0,
+          "pressure_source_visibility_timeout_s": 180,
+          "pressure_source_visibility_poll_s": 5,
+          "pressure_source_visibility_stable_samples": 2,
+          "pressure_source_visibility_restart_attempts": 1,
+          "pressure_source_ffmpeg_timeout_ms": 60000,
+          "pressure_source_ffmpeg_init_timeout_ms": 60000,
+          "pressure_source_start_stagger_s": 0.53,
+          "savant_ablation_stage": "full-evidence",
+          "savant_output_mode": "metadata-only",
+          "cpu_isolation_profile": "none",
+          "cuda_mps": false,
+          "mps_savant_active_thread_percentage": 0,
+          "mps_adaface_active_thread_percentage": 0,
+          "adaface_classifier_async": false,
+          "face_secondary_track_id": false,
+          "adaface_input_queue": false,
+          "adaface_crop_resize": false,
+          "adaface_pre_gate": false,
+          "adaface_decoupled": false,
+          "max_adaface_forwarder_send_failure_ratio": 0.005,
+          "adaface_decoupled_sharded": false,
+          "adaface_roi_redis": true,
+          "adaface_roi_batch_timeout_ms": 10,
+          "analysis_max_queue_age_ms": 30000,
+          "media_worker_materialization_max_active": 4,
+          "media_worker_rolling_remux_workers": 1,
+          "media_worker_segment_index_io_concurrency": 2,
+          "media_worker_db_index_io_concurrency": 0,
+          "media_worker_finalizer_workers": 4,
+          "media_worker_finalizer_process_workers": 4,
+          "media_worker_finalizer_queue_capacity": 4,
+          "media_worker_rolling_max_per_poll": 4,
+          "media_worker_completion_wake": true,
+          "pressure_pause_redis_rdb": false,
+          "pressure_tune_postgres_checkpoints": false,
+          "pressure_rolling_cache_host_root": "",
+          "pressure_rolling_cache_materialized_host_root": "",
+          "pressure_rolling_cache_retention_s": 600,
+          "preserve_warmup_results": false,
+          "pressure_sampling_start_event_ts_ms": 0,
+          "pressure_sampling_end_event_ts_ms": 0,
+          "rolling_cache_publication_workers": 1,
+          "rolling_cache_publication_commit_slots": 0,
+          "rolling_cache_publication_final_parent_group_limit": 1,
+          "rolling_cache_publication_file_sync_mode": "fsync",
+          "rolling_cache_publication_metadata_layout": "split",
+          "allow_rotational_rolling_cache": false,
+          "preflight_without_storage_override": true
+        },
+        "artifact_dir": "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_rotational",
+        "steps": [],
+        "compose_config": {
+          "compose_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+          "env_file": "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+          "storage_override": null,
+          "profiles": [
+            "dual-4090-two-source",
+            "rolling-cache-dual"
+          ]
+        },
+        "rolling_cache_storage": {
+          "status": "failed",
+          "compose": {
+            "command": [
+              "docker",
+              "compose",
+              "--env-file",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/env/midterm.env",
+              "-f",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+              "-f",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_rotational/compose.dual-shard-same-gpu.override.yml",
+              "--profile",
+              "dual-4090-two-source",
+              "--profile",
+              "rolling-cache-dual",
+              "config",
+              "--format",
+              "json"
+            ],
+            "files": [
+              "/tmp/pressure60-phase1-preflight-20261015-r1/infra/docker-compose.midterm.yml",
+              "/tmp/pressure60-phase1-preflight-20261015-r1/artifacts/pressure60_phase1_preflight_20261015_r1_rotational/compose.dual-shard-same-gpu.override.yml"
+            ],
+            "pressure_tmpfs_override": null,
+            "returncode": 0,
+            "services": {
+              "rolling-cache-sink-a": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+                }
+              },
+              "rolling-cache-sink-b": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+                }
+              },
+              "media-worker": {
+                "cache_sources": {
+                  "/media/rolling-cache": "/data/video-analytics/media/rolling-cache",
+                  "/media/rolling-cache-materialized": "/data/video-analytics/media/rolling-cache-materialized"
+                }
+              },
+              "analysis-forwarder": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "analysis-forwarder-a": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "analysis-forwarder-b": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "2048"
+                }
+              },
+              "replay-raw-fanout": {
+                "environment": {
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "replay-raw-fanout-a": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "replay-raw-fanout-b": {
+                "environment": {
+                  "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+                  "FORWARDER_STRICT_FPS_BUDGET": "true",
+                  "FORWARDER_QUEUE_MAX_SIZE": "8192"
+                }
+              },
+              "savant-a": {
+                "environment": {
+                  "FACE_INFER_INTERVAL": "3",
+                  "FACE_EMBEDDING_INFER_INTERVAL": "3"
+                }
+              },
+              "savant-b": {
+                "environment": {
+                  "FACE_INFER_INTERVAL": "3",
+                  "FACE_EMBEDDING_INFER_INTERVAL": "3"
+                }
+              }
+            }
+          },
+          "input": {
+            "uri": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+            "command": [
+              "ffprobe",
+              "-v",
+              "error",
+              "-show_format",
+              "-show_streams",
+              "-of",
+              "json",
+              "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4"
+            ],
+            "returncode": 0,
+            "bytes_per_second_per_camera": 254168.125,
+            "bitrate_source": "format.bit_rate"
+          },
+          "space_estimates": {
+            "materialized": {
+              "formula": "max_pre_plus_post_seconds * bytes_per_second_per_camera * (max_active + finalizer_queue_capacity) * 1.3",
+              "max_pre_plus_post_seconds": 10,
+              "concurrency": 8,
+              "estimated_bytes": 26433485
+            },
+            "evidence": {
+              "formula": "duration_seconds * camera_count * (2 + behavior_rule_count) / cooldown_seconds * max_pre_plus_post_seconds * bytes_per_second_per_camera * 1.3",
+              "duration_seconds": 3600,
+              "event_type_count": 2,
+              "cooldown_seconds": 60,
+              "estimated_bytes": 23790136500
+            }
+          },
+          "services": {
+            "rolling-cache-sink-a": {
+              "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+            },
+            "rolling-cache-sink-b": {
+              "/media/rolling-cache": "/data/video-analytics/media/rolling-cache"
+            },
+            "media-worker": {
+              "/media/rolling-cache": "/data/video-analytics/media/rolling-cache",
+              "/media/rolling-cache-materialized": "/data/video-analytics/media/rolling-cache-materialized"
+            }
+          },
+          "paths": [
+            {
+              "path": "/data/video-analytics/media/rolling-cache",
+              "existing_path": "/data/video-analytics/media/rolling-cache",
+              "realpath": "/data/video-analytics/media/rolling-cache",
+              "device": "8:1",
+              "filesystem_type": "ext4",
+              "is_tmpfs": false,
+              "total_bytes": 1967844491264,
+              "available_bytes": 1755102937088,
+              "rotational": true,
+              "device_chain": [
+                {
+                  "name": "sda1",
+                  "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda/sda1",
+                  "partition": true,
+                  "parents": [
+                    {
+                      "name": "sda",
+                      "sysfs_path": "/sys/devices/pci0000:00/0000:00:08.1/0000:0a:00.2/ata5/host4/target4:0:0/4:0:0:0/block/sda",
+                      "rotational": true,
+                      "transport": null
+                    }
+                  ]
+                }
+              ],
+              "leaf_devices": [
+                "sda"
+              ],
+              "roles": [
+                "rolling_cache"
+              ],
+              "estimated_additional_bytes": 11895068250
+            }
+          ],
+          "filesystems": [],
+          "errors": [
+            "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache"
+          ],
+          "warnings": [],
+          "allow_rotational": false,
+          "retention_seconds": 600,
+          "camera_count": 60,
+          "bytes_per_second_per_camera": 254168.125,
+          "bitrate_safety_factor": 1.3,
+          "estimated_cache_bytes": 11895068250,
+          "estimated_materialized_bytes": 26433485,
+          "estimated_evidence_bytes": 23790136500,
+          "reason": "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache",
+          "exception_type": "StoragePreflightError"
+        },
+        "status": "preflight_failed",
+        "reason": "rotational rolling-cache storage: /data/video-analytics/media/rolling-cache",
+        "preflight_recovery": {
+          "status": "unchanged",
+          "reason": "aborted_before_any_runtime_or_database_mutation"
+        }
+      },
+      "completed": {
+        "utc": "2026-10-15T13:33:25.370478+00:00",
+        "kst": "2026-10-15T22:33:25.370478+09:00"
+      },
+      "expectation_met": true
+    }
+  ],
+  "after": [
+    {
+      "id": "a8a63e4ed4265a551b3b742032c2b6a2bc33ca4cf13367eecc97612b96445200",
+      "name": "/video-analytics-midterm-adaface-roi-worker",
+      "image": "sha256:2197771e3f8eb9cd7e6b21ef690b7efa971b85623ce4ed93b0baea14df296c4a",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:51.548832115Z",
+        "FinishedAt": "2026-10-13T00:06:02.26607163Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "5b4c2c29eca94d8e0a849d92df11113947087f05fa49a65d5fdd305ff93f52af",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "e3e43fca89eb1be1bb6a2f8348c43447d1351952702c1ca90ad69831a6fe1482",
+      "name": "/video-analytics-midterm-analysis-forwarder",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3955,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.213876058Z",
+        "FinishedAt": "2026-10-13T02:03:45.889458786Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "34e4729446eb50c651ea65e97d55d9359f301b95ae447aad20fa8bfe453d78fd",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "7e5306e0ea60a28f2111db5a3ba5b70059be3b70a63648f10ca7a0febfa139e5",
+      "name": "/video-analytics-midterm-analysis-forwarder-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "created",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "ee66d97c191eecddabb202621ca68bfcdb465efbfd3128b88669a794475da1ad",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "0762dec4a8fd69be528286876fd90e8bc375609584542c8d5fe0006854632356",
+      "name": "/video-analytics-midterm-analysis-forwarder-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "created",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "f0a8fd6fc3329c6bc5c33a9c4be5b831482c96ecc939282897af491466f2ead3",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "fa07af6a41077f133f28c99effe35d8e8965c386bb7a1b0cf3f2d608b2df3a2b",
+      "name": "/video-analytics-midterm-api",
+      "image": "sha256:19648e5fa425b4607089ebdddd6a9c3e44065f8fa66fb314da63802969ef8dc6",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3470,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.716518663Z",
+        "FinishedAt": "2026-10-13T02:03:46.431530752Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/api",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/app/modules/savant_security",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/face_trajectory_cache",
+          "Destination": "/data/video-analytics/media/face_trajectory_cache",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models-savant-b",
+          "Destination": "/data/video-analytics/models-savant-b",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/var/run/docker.sock",
+          "Destination": "/var/run/docker.sock",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1996a94ba311d8574f254b92703d5fcfcf9c62f3264500f21e27a8f64ca6bd63",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml,/home/user/video-analytics/infra/main-integration.private.override.yml"
+    },
+    {
+      "id": "a010c7e021809c9437748aa4abe9b078be75d1be4d88bc6283c521aea4c7c7f4",
+      "name": "/video-analytics-midterm-clip-worker",
+      "image": "sha256:12bdd5100ea86b13a0274b33db2eb178191f0b1b6ca21b7e01e189800e8a9e1a",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4600,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.682639225Z",
+        "FinishedAt": "2026-10-15T09:44:54.952140311Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/clip-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "906dcc28bf2abc255c9b174bc8a6dd47a54241f8c1b31b35b49051e5eeed87bc",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "acfd0be36deeccebe5a6babf4bee8650cec52b74606d9331f3eeb4013738c06a",
+      "name": "/video-analytics-midterm-cuda-mps-operator",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:54:50.696197915Z",
+        "FinishedAt": "2026-07-15T15:13:34.378267085Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "407468a60458f79756ecc81d079dd12ce29f20d96d5a1e4b2e579d7274b8d349",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "ae1e5ddd4bb34e6f725b4bfb919c06b51858f1f4ed987c690fc8a77e94c6017f",
+      "name": "/video-analytics-midterm-event-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4576,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.686211632Z",
+        "FinishedAt": "2026-10-15T09:44:53.891129557Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "215a4a378b1260410a36dd1b3d3200cc4a3ff24680799fe46c59241576c93a0a",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_event_worker_evidence_admission.override.yml"
+    },
+    {
+      "id": "53a1b55ea0faaba73b27fa9fc6be7a4a53484fb1300b1213f0271bb2da4b3dda",
+      "name": "/video-analytics-midterm-evidence-viewer",
+      "image": "sha256:2cb88aee7ee5a7d764fd6a2beca2cf33ef373cb955860ebdddf1726d232cb7c0",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3157,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.44921354Z",
+        "FinishedAt": "2026-10-15T09:44:46.101564984Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/evidence-viewer",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/app/modules/savant_security/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/evidence",
+          "Destination": "/evidence",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f960c3693a5fe3e15ed9fae70e65e7c9435bd4ad3eb7ad7a033eb878c71e6372",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml,/home/user/video-analytics/infra/main-integration.private.override.yml"
+    },
+    {
+      "id": "3d9d4dcf842d2c0c52f987973c432e13f41036cec571abb2e39eab59405b6bf0",
+      "name": "/video-analytics-midterm-face-worker",
+      "image": "sha256:7be0bd8d4c1e9e71b115275bd02ffef9f29fe7b0e9f6278b96806fdad71befe0",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4451,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.182933634Z",
+        "FinishedAt": "2026-10-15T09:44:54.30142804Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/face-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/face_trajectories",
+          "Destination": "/data/video-analytics/media/face_trajectories",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "6,14",
+      "environment_sha256": "5a28176bc3685bb991c2a68bdb395d2dae9ec661a2d2acda37db5a04afcf7d1e",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "6e2cc8f01f5ad4e195a0d9fa01dc022155228a13ab4024a459780f471b58a7cd",
+      "name": "/video-analytics-midterm-media-worker",
+      "image": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4601,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.663775262Z",
+        "FinishedAt": "2026-10-15T09:44:55.151095456Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/media-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/opt/savant/src/module/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f78eaa30eab190bb6615fae54523924f83cd5377d2bfec39a2694067619676de",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose_restore_media_worker_rolling_cache.override.yml"
+    },
+    {
+      "id": "18ee0f1f609bbb17b2829f7c88030a43fee1ae2cdf2707db2b405f969223c916",
+      "name": "/video-analytics-midterm-person-observation-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 4410,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:56.023575474Z",
+        "FinishedAt": "2026-10-15T09:44:54.560689448Z"
+      },
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "15",
+      "environment_sha256": "0eddbf3e97c59613f8aeefcc69c75b45cb833f701f005130f0c7ded4388f1b9d",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "48325468f085f049bef9ece4fdbfd57f35566d8646d2aef373476190d328d34a",
+      "name": "/video-analytics-midterm-postgres",
+      "image": "sha256:b295c2aa92725ecaaa58ffb6664035b45076318d8ca93ae4a9b0994481862f7d",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3680,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:50.372001744Z",
+        "FinishedAt": "2026-10-13T02:03:45.881407092Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/db/migrations",
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/postgres-midterm",
+          "Destination": "/var/lib/postgresql/data",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b6198c5575aeba64ca9aae6f9bb5625ee743e327a799c0f6aed7bd7f3457d93f",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "5c6da50a69f516eeb08fe44e5461deaeb43d5df92240e016689e841d79a46ce8",
+      "name": "/video-analytics-midterm-redis",
+      "image": "sha256:487efc0616382465781b8fdc3d6d1db449e6fd80ae23bf48432a2da6b6929908",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2962,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:49.206203271Z",
+        "FinishedAt": "2026-10-15T09:44:46.101708692Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b",
+          "Source": "/home/docker-data/volumes/43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b0d41ad25e5eaaf314ea86e631a7364d75aa3f7efab4ce94c92a603f2d55b3b7",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "1989d78d4eb9d7c47de1e80c5d12f386e398c15ee31dc73f9ee297314a32c6ad",
+      "name": "/video-analytics-midterm-replay-a",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:20.695641351Z",
+        "FinishedAt": "2026-07-15T15:13:05.539015878Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-a.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-a",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "c0ba0b6ff043ad1ec2ce85d0fe84ed83fa4117ef1bd53d27acbbfa17c1ae6ea3",
+      "name": "/video-analytics-midterm-replay-b",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:36.415039661Z",
+        "FinishedAt": "2026-07-15T15:13:16.119299936Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-b.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-b",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "60370a9fcc86a95f555618d805325d3c88438958dc8ff28ddf98fef4fefee2e4",
+      "name": "/video-analytics-midterm-replay-raw-fanout",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2904,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:47.723401886Z",
+        "FinishedAt": "2026-10-13T02:03:46.160051236Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7979108ff20f5b949c6293332f04f5a2c248573755b5b92f22da1e191aecc346",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "5b58872659ce461f6d294189cf7f0ba78917bcda0f2b9e45a6adee2d9ffdd9bc",
+      "name": "/video-analytics-midterm-replay-raw-fanout-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 1,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:54.0228586Z",
+        "FinishedAt": "2026-10-13T00:06:01.189407304Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7e64c6cb1f2f7759a0245bdd00d7e4540732fceca0ebe54568969531eb0f7971",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "bc66e5ceb995ddd24abe70036eca1a2af91589b26a8fe8975af4233feba0f646",
+      "name": "/video-analytics-midterm-replay-raw-fanout-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 1,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:54.115196424Z",
+        "FinishedAt": "2026-10-13T00:06:01.287326789Z"
+      },
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "5e61ec525142f8c37816c9a61ff335360d3bd6585add080d989039adbc96f39a",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "32f6d762f388c875da2794a81a951ae1bff881e2c6cf08e36a179b8beae41256",
+      "name": "/video-analytics-midterm-replay-service",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 2847,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:47.521379865Z",
+        "FinishedAt": "2026-10-15T09:44:46.101547285Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a6f6baf1ed719c3d58d9760e3307612e9e8342a5558f0cfb4bb248a2e62ce4",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml"
+    },
+    {
+      "id": "fd1763770f14fdb65e1d4f043f6b90cb7706025298cb7932a2f56d768b66bd3b",
+      "name": "/video-analytics-midterm-rolling-cache-sink-a",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3940,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.900981539Z",
+        "FinishedAt": "2026-10-13T02:03:46.019051294Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "574ffa72e925b0a40f3f7f6256150efa4de2405f03a133da0d016aa68cb088a1",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "1312a9ce9d2c58ea44c9aa924ab74a2cb45fda6a4d1a5584e7bf730d953cb4b3",
+      "name": "/video-analytics-midterm-rolling-cache-sink-b",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3947,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:54.242987935Z",
+        "FinishedAt": "2026-10-13T02:03:46.068356864Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "10913d18fda0d865eab89b9b495b871870444baa3320bf906585fd0c610f9ea6",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "4bac0d99faecb750c42a828677a74708625eaef6e7bd1cc656518ab1e69c4690",
+      "name": "/video-analytics-midterm-savant",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3953,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:55.352024681Z",
+        "FinishedAt": "2026-10-13T02:03:47.599026882Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "eab29313314f8411820518018982b1eaa4885453767da46235d11d02529e4b35",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml"
+    },
+    {
+      "id": "f3bfc6356a808cd1cdddc4bee156fd3b6c60cd986fb0425caf52c222731a60d4",
+      "name": "/video-analytics-midterm-savant-a",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:52.405152424Z",
+        "FinishedAt": "2026-10-13T00:06:04.831772132Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "67d9b62b275b67502ff5bc19e3c05e204c7c5793efdd479ec85e6c79ae1e4d3f",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "c2486f6c7d57528658073a4a16c13deed5c4fcea0241f60c221f5c79afdfcd79",
+      "name": "/video-analytics-midterm-savant-b",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-12T21:30:53.502593967Z",
+        "FinishedAt": "2026-10-13T00:06:05.814522762Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "cf942fa0eeab962908f7433e1d9fc981da41a6a7225917f698fc14207f9ae569",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/data/video-analytics/artifacts/pressure60_allalg_rr157_uos157_1h_20261013_qwen27b_face4_remux2/compose.dual-shard-same-gpu.override.yml"
+    },
+    {
+      "id": "fbe544ecada3e0883f7ada33f2e720e07b2f144514429dbea2e69badd24ae8cb",
+      "name": "/video-analytics-midterm-video-file-sink",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 3728,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-15T09:44:50.367946335Z",
+        "FinishedAt": "2026-10-13T02:03:45.879593435Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "5b1ed1a1b53e814fbd40fd61cbfbf67d9970f39b39f3963fbf60901d157d1e3b",
+      "working_dir": null,
+      "config_files": null
+    },
+    {
+      "id": "7c34133138b43b4812a8107c0811524ce6136dc8e8f3a52fb5827dbedf2e8766",
+      "name": "/video-analytics-midterm-video-file-sink-a",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:21.068305289Z",
+        "FinishedAt": "2026-07-15T15:13:22.389307333Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b8172457b5beeb6458c782f2cbc20e89c7d7214ed9fd5d254a497004bf7671ac",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "82e8a1237241b2c14e261bf275e268ab93e9cd2212fc66dfb2af9114a1ade294",
+      "name": "/video-analytics-midterm-video-file-sink-b",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-07-15T10:55:36.795203673Z",
+        "FinishedAt": "2026-07-15T15:13:23.038873551Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "6edefbef793f2cbce572fadd2a23fef75e4bd36137c4229ae48d88d33d5cf2e3",
+      "working_dir": "/home/user/video-analytics/infra",
+      "config_files": "/home/user/video-analytics/infra/docker-compose.midterm.yml,/home/user/video-analytics/infra/midterm-storage.override.yml,/home/user/video-analytics/infra/operator-dual-runtime.override.yml"
+    },
+    {
+      "id": "e445e6cbdb486e5bcbdfa01fb50147ebb848c935b4ec1a038ffb216d9eff50df",
+      "name": "/video-analytics-midterm-video-file-sink-pressure-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-10-09T16:57:44.473272552Z",
+        "FinishedAt": "2026-10-09T17:02:26.517665139Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "25ad5200e8062d9d0def27ea9c16c28beafb80c6aabc786c4c2c985e2525c647",
+      "working_dir": null,
+      "config_files": null
+    },
+    {
+      "id": "61c145125bf6aae7e58c3e8af796e0db6f356461dfc3fe7834c7b6f453b7687c",
+      "name": "/video-analytics-midterm-video-file-sink-pressure1h-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 130,
+        "Error": "",
+        "StartedAt": "2026-10-09T19:18:32.504261755Z",
+        "FinishedAt": "2026-10-09T19:21:11.517842028Z"
+      },
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1faecbd5e16d521f4a543404dc13931e1605e2d240eeef0c0898a1b521f5daf0",
+      "working_dir": null,
+      "config_files": null
+    }
+  ],
+  "container_count": 30,
+  "containers_unchanged": true,
+  "completed": {
+    "utc": "2026-10-15T13:33:25.438974+00:00",
+    "kst": "2026-10-15T22:33:25.438974+09:00"
+  }
+}

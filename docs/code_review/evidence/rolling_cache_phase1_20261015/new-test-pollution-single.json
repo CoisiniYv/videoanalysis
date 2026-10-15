@@ -1,0 +1,44 @@
+{
+  "severity": "red",
+  "blocking": false,
+  "findings": [
+    {
+      "code": "historical_pressure_sources",
+      "service": "rolling-cache-sink",
+      "sources": [
+        "canary_old_00"
+      ]
+    },
+    {
+      "code": "historical_pressure_sources",
+      "service": "media-worker",
+      "sources": [
+        "canary_old_00"
+      ]
+    },
+    {
+      "code": "enabled_pressure_rules",
+      "rules": [
+        {
+          "source_id": "canary_old_00",
+          "site_id": "pressure",
+          "location": "pressure-00",
+          "enabled": true,
+          "algorithm_id": "behavior.fall"
+        }
+      ]
+    },
+    {
+      "code": "runtime_camera_count_mismatch",
+      "expected": 40,
+      "actual": 1
+    }
+  ],
+  "unverified": [
+    "rolling-cache-sink.formal_retention",
+    "media-worker.formal_retention",
+    "formal_retention:TypeError"
+  ],
+  "expected_runtime_source_count": 40,
+  "actual_enabled_source_count": 1
+}

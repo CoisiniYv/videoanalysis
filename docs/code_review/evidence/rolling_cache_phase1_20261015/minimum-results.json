@@ -1,0 +1,81 @@
+{
+  "compose-base": {
+    "command": [
+      "docker",
+      "compose",
+      "--env-file",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/env/midterm.env",
+      "-f",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/docker-compose.midterm.yml",
+      "config"
+    ],
+    "started_at_kst": "2026-10-15T20:59:52.724027+09:00",
+    "ended_at_kst": "2026-10-15T20:59:54.451517+09:00",
+    "returncode": 0,
+    "stdout": "/tmp/pressure60-readonly-validation/compose-base.stdout",
+    "stderr": "/tmp/pressure60-readonly-validation/compose-base.stderr"
+  },
+  "compose-storage": {
+    "command": [
+      "docker",
+      "compose",
+      "--env-file",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/env/midterm.env",
+      "-f",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/docker-compose.midterm.yml",
+      "-f",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/midterm-storage.override.yml",
+      "config"
+    ],
+    "started_at_kst": "2026-10-15T20:59:54.451596+09:00",
+    "ended_at_kst": "2026-10-15T20:59:55.285231+09:00",
+    "returncode": 0,
+    "stdout": "/tmp/pressure60-readonly-validation/compose-storage.stdout",
+    "stderr": "/tmp/pressure60-readonly-validation/compose-storage.stderr"
+  },
+  "deployment-contract": {
+    "command": [
+      "/Users/khonsu/.cache/uv/builds-v0/.tmp4ZhSVS/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/harness/tests/test_midterm_deployment_contract.py"
+    ],
+    "started_at_kst": "2026-10-15T20:59:55.285285+09:00",
+    "ended_at_kst": "2026-10-15T20:59:56.231087+09:00",
+    "returncode": 1,
+    "stdout": "/tmp/pressure60-readonly-validation/deployment-contract.stdout",
+    "stderr": "/tmp/pressure60-readonly-validation/deployment-contract.stderr"
+  },
+  "smoke": {
+    "command": [
+      "bash",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/scripts/smoke/current/check_midterm_deployment.sh"
+    ],
+    "started_at_kst": "2026-10-15T20:59:56.231116+09:00",
+    "ended_at_kst": "2026-10-15T20:59:57.890051+09:00",
+    "returncode": 1,
+    "stdout": "/tmp/pressure60-readonly-validation/smoke.stdout",
+    "stderr": "/tmp/pressure60-readonly-validation/smoke.stderr"
+  },
+  "doctor": {
+    "command": [
+      "bash",
+      "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/scripts/runtime/doctor_midterm.sh"
+    ],
+    "started_at_kst": "2026-10-15T20:59:57.890078+09:00",
+    "ended_at_kst": "2026-10-15T21:00:01.393435+09:00",
+    "returncode": 1,
+    "stdout": "/tmp/pressure60-readonly-validation/doctor.stdout",
+    "stderr": "/tmp/pressure60-readonly-validation/doctor.stderr"
+  },
+  "source_sha256": {
+    "infra/docker-compose.midterm.yml": "e74ac00aa8d93913c2cbc41cb7e7a7ccdec3e35c48163adef4f3a342261c3a38",
+    "infra/env/midterm.env": "247b0f79cb4caaacd1d759d97640e788ed46d61a25d951a3b0e55ed8166602fb",
+    "infra/midterm-storage.override.yml": "5194c03f262eec72f4325e86f81926f654d0462a6fbc7b4b6a53ea79c259c499",
+    "scripts/runtime/run_midterm_pressure60.py": "7703ffdfc004fe421fecb6737f68a3d853ce19116dcc5d5a69543ff70846058a",
+    "scripts/runtime/doctor_midterm.sh": "a9ac36b91cf6ee0f1a9b0642080385e1638a61dfcc482066f52fd001ac6128f7",
+    "scripts/smoke/current/check_midterm_deployment.sh": "d76fa78f89859a46e6baece058c84dfdfa812fb37ca18c60bc7d0808532a242a"
+  },
+  "rendering_note": "Local YAML and environment bytes were transmitted over SSH stdin. Service env_file paths were changed to anonymous memfd paths; --project-directory retained the independent local infra path for relative path normalization. Remote commands were docker compose config and docker inspect only, with no remote disk writes."
+}

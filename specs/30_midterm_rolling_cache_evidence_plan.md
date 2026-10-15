@@ -2,6 +2,23 @@
 
 Date: 2026-07-04
 
+## 2026-10-15 Implementation Status
+
+Pressure harness storage and restore guards, runtime configuration readback,
+per-shard/publication statistics, reproducible behavior rules, and nonblocking
+baseline contamination reporting have a draft implementation in an independent
+branch. The newly authorized repair passed real readonly NVMe/HDD preflight
+checks (exit 0 / 2); all 30 production containers were unchanged. The current
+full harness has 11 failures, each present in baseline 98d388c (15 failures),
+with no new collection error. Completion-wake compatibility, explicit scheduler
+setting verification, pollution test doubles, and minimal invalid-argument
+reports are repaired. Stage 1 is ready for push and Opus review. The user now
+allows up to three repair rounds within stage 1, while preserving these gates.
+See [the development and validation record](../docs/midterm_pressure_storage_guard_2026-10-15.md).
+Production deployment is unchanged. Push, Opus review, and a separately approved
+maintenance window remain required before stage 2; this status is not a load-test
+acceptance result.
+
 ## 1. Goal
 
 Build a production-oriented rolling evidence cache so midterm evidence generation no

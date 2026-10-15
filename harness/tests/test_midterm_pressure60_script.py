@@ -875,9 +875,9 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
     ]
 
 
-def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() -> None:
+def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting(tmp_path) -> None:
     module = _load_module()
-    cfg = _config(module, stream_count=1)
+    cfg = _config(module, stream_count=1, artifact_dir=tmp_path)
 
     class FakeTx:
         def __enter__(self):
@@ -893,6 +893,9 @@ def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() 
         def fetchone(self):
             return self.row
 
+        def fetchall(self):
+            return self.row or []
+
     class FakeConn:
         def __init__(self):
             self.calls = []
@@ -904,6 +907,11 @@ def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() 
             self.calls.append((query, params))
             if "site_id='pressure' AND location=%s" in query:
                 return Result({"id": "reusable-pressure-slot"})
+            if "camera_id=ANY" in query:
+                return Result([
+                    {"camera_id": "reusable-pressure-slot", "algorithm_id": "behavior.intrusion"},
+                    {"camera_id": "reusable-pressure-slot", "algorithm_id": "face.watchlist"},
+                ])
             if "FROM camera_rules" in query:
                 return Result({"id": 11})
             return Result()
@@ -919,12 +927,13 @@ def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() 
     assert any("UPDATE cameras SET source_id=%s" in query for query in queries)
     assert any("ON CONFLICT (camera_id, zone_id)" in query for query in queries)
     assert not any("ON CONFLICT (camera_id, zone_name)" in query for query in queries)
-    assert sum("UPDATE camera_rules" in query for query in queries) == 2
+    assert sum("UPDATE camera_rules" in query and "enabled=true" in query for query in queries) == 2
+    assert sum("UPDATE camera_rules SET enabled=false" in query for query in queries) == 1
 
 
-def test_pressure_camera_provisioning_creates_only_missing_slots() -> None:
+def test_pressure_camera_provisioning_creates_only_missing_slots(tmp_path) -> None:
     module = _load_module()
-    cfg = _config(module, stream_count=1)
+    cfg = _config(module, stream_count=1, artifact_dir=tmp_path)
 
     class FakeTx:
         def __enter__(self):
@@ -934,18 +943,32 @@ def test_pressure_camera_provisioning_creates_only_missing_slots() -> None:
             return False
 
     class Result:
+        def __init__(self, rows=()):
+            self.rows = rows
+
         def fetchone(self):
             return None
+
+        def fetchall(self):
+            return self.rows
 
     class FakeConn:
         def __init__(self):
             self.calls = []
+            self.camera_id = None
 
         def transaction(self):
             return FakeTx()
 
         def execute(self, query, params=None):
             self.calls.append((query, params))
+            if "INSERT INTO cameras" in query:
+                self.camera_id = params[0]
+            if "camera_id=ANY" in query:
+                return Result([
+                    {"camera_id": self.camera_id, "algorithm_id": "behavior.intrusion"},
+                    {"camera_id": self.camera_id, "algorithm_id": "face.watchlist"},
+                ])
             return Result()
 
     conn = FakeConn()
@@ -1414,7 +1437,8 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
 
     monkeypatch.setattr(module, "configure_event_worker_evidence_admission", capture_event)
 
-    def capture_media(_cfg, *, values, artifact_name):
+    def capture_media(_cfg, *, values, artifact_name, pressure=False):
+        assert pressure is True
         captured[artifact_name] = dict(values)
         return {"requested": values}
 
@@ -1549,6 +1573,7 @@ def test_media_worker_pressure_config_writes_auditable_compose_override(
         cfg,
         values=values,
         artifact_name="media-pressure.log",
+        pressure=True,
     )
 
     override_path = tmp_path / "media-pressure.override.yml"
@@ -4024,6 +4049,15 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
     monkeypatch.setattr(module.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(module, "run", fake_run)
     monkeypatch.setattr(module, "docker_container_cpuset", observed.__getitem__)
+    monkeypatch.setattr(
+        module,
+        "inspect_container",
+        lambda _container: {
+            "Config": {"Env": ["ORIGINAL=value"]},
+            "Image": "sha256:original",
+            "State": {"Running": True},
+        },
+    )
 
     result = module.restore_worker_cpu_isolation(
         cfg,
@@ -4031,7 +4065,12 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
             "profile": "test",
             "containers": {
                 "video-analytics-midterm-event-worker": {"original_cpuset": "1-2"},
-                "video-analytics-midterm-face-worker": {"original_cpuset": ""},
+                "video-analytics-midterm-face-worker": {
+                    "original_cpuset": "",
+                    "environment": {"ORIGINAL": "value"},
+                    "image": "sha256:original",
+                    "running": True,
+                },
             },
         },
     )
@@ -4049,7 +4088,7 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
         "docker",
         "compose",
         "--env-file",
-        cfg.env_file,
+        str(Path(cfg.env_file).resolve()),
         "-f",
         str(compose_file),
         "-f",
@@ -4061,6 +4100,11 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
         "restored_cpuset": "",
         "observed_cpuset": "",
         "method": "compose_recreate",
+        "snapshot_verification": {
+            "environment_matches": True,
+            "image_matches": True,
+            "running_matches": True,
+        },
         "ok": True,
         "error": "",
     }
@@ -4167,7 +4211,7 @@ def test_configure_clip_worker_for_topology_shards_injects_json_env(
         {"replay_shards_path": str(shard_path)},
     )
 
-    assert "up -d --no-deps --force-recreate clip-worker" in observed["cmd"]
+    assert "up -d --no-build --no-deps --force-recreate clip-worker" in observed["cmd"]
     assert observed["REPLAY_SHARDS_CONFIG_PATH"] == ""
     assert observed["EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS"] == (
         "intrusion:2,watchlist_hit:2"
@@ -4973,7 +5017,7 @@ def test_forwarder_queue_full_uses_instantaneous_depth_after_confirmation(
         "fetch_forwarder_queue_depth_sample",
         lambda _cfg: {"queue_depth": 0, "shards": []},
     )
-    overview = {"forwarder": {"global": {"queue_depth": 2048}, "sources": []}}
+    overview = {"forwarder": {"global": {"queue_depth": 2048, "queue_max_size": 2048}, "sources": []}}
     module.confirm_forwarder_queue_depth(cfg, overview)
     samples = tmp_path / "samples"
     samples.mkdir()
@@ -6502,8 +6546,8 @@ def test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compo
     summary = module.restore_rolling_cache_sinks_after_pressure(
         cfg,
         original_states={
-            "rolling-cache-sink-a": {"running": False, "status": "exited"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+            "rolling-cache-sink-a": {"running": False, "status": "exited", "environment": daily_env},
+            "rolling-cache-sink-b": {"running": False, "status": "exited", "environment": daily_env},
         },
         artifact_name="compose_restore_rolling_cache_sinks.log",
     )
@@ -6588,8 +6632,8 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
     summary = module.restore_rolling_cache_sinks_after_pressure(
         cfg,
         original_states={
-            "rolling-cache-sink-a": {"running": False, "status": "exited"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+            "rolling-cache-sink-a": {"running": False, "status": "exited", "environment": daily_env},
+            "rolling-cache-sink-b": {"running": False, "status": "exited", "environment": daily_env},
         },
         artifact_name="compose_restore_rolling_cache_sinks.log",
     )
@@ -6598,7 +6642,10 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
     restore_env = calls[0]["kwargs"]["env"]
     for key in pressure_env:
         assert key not in restore_env
-    assert summary["daily_expected_env"] == daily_env
+    assert summary["expected_env"] == {
+        "rolling-cache-sink-a": daily_env,
+        "rolling-cache-sink-b": daily_env,
+    }
     assert summary["restored_env"] == {
         "rolling-cache-sink-a": daily_env,
         "rolling-cache-sink-b": daily_env,
@@ -6639,8 +6686,8 @@ def test_restore_rolling_cache_sinks_fails_on_daily_env_mismatch(
         module.restore_rolling_cache_sinks_after_pressure(
             cfg,
             original_states={
-                "rolling-cache-sink-a": {"running": False, "status": "exited"},
-                "rolling-cache-sink-b": {"running": False, "status": "exited"},
+                "rolling-cache-sink-a": {"running": False, "status": "exited", "environment": dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)},
+                "rolling-cache-sink-b": {"running": False, "status": "exited", "environment": dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)},
             },
             artifact_name="compose_restore_rolling_cache_sinks.log",
         )
@@ -6679,8 +6726,8 @@ def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
     summary = module.restore_rolling_cache_sinks_after_pressure(
         cfg,
         original_states={
-            "rolling-cache-sink-a": {"running": True, "status": "running"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+            "rolling-cache-sink-a": {"running": True, "status": "running", "environment": daily_env},
+            "rolling-cache-sink-b": {"running": False, "status": "exited", "environment": daily_env},
         },
         artifact_name="compose_restore_rolling_cache_sinks.log",
     )
@@ -6832,6 +6879,7 @@ def test_start_rolling_cache_sinks_fails_when_dual_raw_fanout_missing(
         }
 
     monkeypatch.setattr(module, "docker_container_state", fake_container_state)
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: {})
 
     try:
         module.start_rolling_cache_sinks_for_pressure(
@@ -6950,7 +6998,9 @@ def test_run_preserves_partial_output_when_nonfatal_command_times_out(
     assert completed.returncode == 124
     assert "partial runtime log" in completed.stdout
     assert "timed out after 1.25s" in completed.stdout
-    assert log_path.read_text(encoding="utf-8") == completed.stdout
+    log_text = log_path.read_text(encoding="utf-8")
+    assert log_text.splitlines()[0] == "$ " + " ".join(command)
+    assert log_text.split("\n", 1)[1] == completed.stdout
 
 
 def test_combined_docker_logs_use_fixed_end_and_bound_each_container(

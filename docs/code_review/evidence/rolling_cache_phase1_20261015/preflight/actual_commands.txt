@@ -1,0 +1,26 @@
+# live_unknown_bitrate
+# cwd=/tmp/pressure60-phase1-preflight-20261015
+# started_kst=2026-10-15T21:07:10.253679+09:00
+# completed_kst=2026-10-15T21:07:11.083136+09:00
+# process environment: unset DATABASE_URL VIDEO_ANALYTICS_DATABASE_URL ROLLING_CACHE_HOST_ROOT ROLLING_CACHE_MATERIALIZED_HOST_ROOT;
+# set PYTHONDONTWRITEBYTECODE=1; process-only additions={}
+# returncode=1; report.json absent
+/usr/bin/python3 scripts/runtime/run_midterm_pressure60.py --preflight-only --compose-file /tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml --env-file /tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env --artifact-root /tmp/pressure60-phase1-preflight-20261015/artifacts --dual-shard-same-gpu --rolling-cache-evidence --streams 60 --fps 4/1 --min-fps 99/25 --duration-s 3600 --drain-s 300 --pressure-rolling-cache-retention-s 600 --evidence-policy-groups 5:5 --evidence-group-size 60 --pressure-algorithm-cooldown-s 60 --media-worker-materialization-max-active 4 --media-worker-finalizer-workers 4 --media-worker-finalizer-queue-capacity 4 --media-worker-rolling-remux-workers 1 --face-infer-interval 3 --face-embedding-infer-interval 3 --analysis-max-queue-age-ms 30000 --adaface-roi-redis --savant-output-mode metadata-only --run-id phase1_preflight_20261015_live_unknown_bitrate --rtsp-republish-input-uri rtsp://192.168.1.105:8554/live/1080movie
+
+# nvme
+# cwd=/tmp/pressure60-phase1-preflight-20261015
+# started_kst=2026-10-15T21:07:11.085304+09:00
+# completed_kst=2026-10-15T21:07:11.914518+09:00
+# process environment: unset DATABASE_URL VIDEO_ANALYTICS_DATABASE_URL ROLLING_CACHE_HOST_ROOT ROLLING_CACHE_MATERIALIZED_HOST_ROOT;
+# set PYTHONDONTWRITEBYTECODE=1; process-only additions={}
+# returncode=1; report.json absent
+/usr/bin/python3 scripts/runtime/run_midterm_pressure60.py --preflight-only --compose-file /tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml --env-file /tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env --artifact-root /tmp/pressure60-phase1-preflight-20261015/artifacts --dual-shard-same-gpu --rolling-cache-evidence --streams 60 --fps 4/1 --min-fps 99/25 --duration-s 3600 --drain-s 300 --pressure-rolling-cache-retention-s 600 --evidence-policy-groups 5:5 --evidence-group-size 60 --pressure-algorithm-cooldown-s 60 --media-worker-materialization-max-active 4 --media-worker-finalizer-workers 4 --media-worker-finalizer-queue-capacity 4 --media-worker-rolling-remux-workers 1 --face-infer-interval 3 --face-embedding-infer-interval 3 --analysis-max-queue-age-ms 30000 --adaface-roi-redis --savant-output-mode metadata-only --run-id phase1_preflight_20261015_nvme --rtsp-republish-input-uri /tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4
+
+# rotational
+# cwd=/tmp/pressure60-phase1-preflight-20261015
+# started_kst=2026-10-15T21:07:11.916765+09:00
+# completed_kst=2026-10-15T21:07:12.743314+09:00
+# process environment: unset DATABASE_URL VIDEO_ANALYTICS_DATABASE_URL ROLLING_CACHE_HOST_ROOT ROLLING_CACHE_MATERIALIZED_HOST_ROOT;
+# set PYTHONDONTWRITEBYTECODE=1; process-only additions={"ROLLING_CACHE_HOST_ROOT": "/data/video-analytics/media/rolling-cache", "ROLLING_CACHE_MATERIALIZED_HOST_ROOT": "/data/video-analytics/media/rolling-cache-materialized"}
+# returncode=1; report.json absent
+/usr/bin/python3 scripts/runtime/run_midterm_pressure60.py --preflight-only --compose-file /tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml --env-file /tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env --artifact-root /tmp/pressure60-phase1-preflight-20261015/artifacts --dual-shard-same-gpu --rolling-cache-evidence --streams 60 --fps 4/1 --min-fps 99/25 --duration-s 3600 --drain-s 300 --pressure-rolling-cache-retention-s 600 --evidence-policy-groups 5:5 --evidence-group-size 60 --pressure-algorithm-cooldown-s 60 --media-worker-materialization-max-active 4 --media-worker-finalizer-workers 4 --media-worker-finalizer-queue-capacity 4 --media-worker-rolling-remux-workers 1 --face-infer-interval 3 --face-embedding-infer-interval 3 --analysis-max-queue-age-ms 30000 --adaface-roi-redis --savant-output-mode metadata-only --run-id phase1_preflight_20261015_rotational --rtsp-republish-input-uri /tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4

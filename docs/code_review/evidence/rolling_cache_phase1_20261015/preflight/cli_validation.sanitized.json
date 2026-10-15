@@ -1,0 +1,2306 @@
+{
+  "started": {
+    "utc": "2026-10-15T12:07:10.132815+00:00",
+    "kst": "2026-10-15T21:07:10.132826+09:00"
+  },
+  "python": "3.7.9 (default, Sep  8 2023, 11:38:57) \n[GCC 7.3.0]",
+  "source_sha256": {
+    "scripts/runtime/run_midterm_pressure60.py": "7703ffdfc004fe421fecb6737f68a3d853ce19116dcc5d5a69543ff70846058a",
+    "scripts/runtime/pressure_storage_guard.py": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27",
+    "scripts/runtime/pressure_storage_preflight.py": "69f44478839a60c5fefd84ec474dde58f636b19915e54f53e4de428d029f1276",
+    "scripts/runtime/pressure_runtime_readback.py": "d4669ca4a90bfc69519144c823e97a135c95dae535c7a83a41b675922c5cec52",
+    "scripts/runtime/pressure_baseline_guard.py": "a2161310f0454e0e6fab81506b77a9a46e316f0c7d7773ef61046e5ee123968a",
+    "scripts/tools/parse_video_file_sink_pressure.py": "bcd8ac070af9526bf98ee21ba586391aae54317bc4c73e2c3c658d58787bd21a",
+    "libs/evidence_lifecycle/__init__.py": "6ae7aecd5b19b1cf905074e06baa2b007a8067d3f902b6b94295e8809d6a4d19",
+    "libs/evidence_lifecycle/contract.py": "918ce04d25aa46200c2a10c8805c9062e5944a7ab205e704fde80df89a45bf23",
+    "infra/docker-compose.midterm.yml": "e74ac00aa8d93913c2cbc41cb7e7a7ccdec3e35c48163adef4f3a342261c3a38",
+    "infra/midterm-storage.override.yml": "5194c03f262eec72f4325e86f81926f654d0462a6fbc7b4b6a53ea79c259c499",
+    "infra/env/midterm.env": "247b0f79cb4caaacd1d759d97640e788ed46d61a25d951a3b0e55ed8166602fb",
+    "modules/savant_security/module.yml": "08c10510094dff557873e0def70c2befa11f025e3b7d96e3fe2024d79be11d59"
+  },
+  "input": {
+    "source_uri": "rtsp://192.168.1.105:8554/live/1080movie",
+    "sample_path": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+    "sample_sha256": "4920a50af4f052fc6a479519af94ba5b40e683655bd20cbe73a912cadd09dc65",
+    "ffprobe": {
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "Constrained Baseline",
+          "codec_type": "video",
+          "codec_time_base": "118243/5670000",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "width": 1920,
+          "height": 1080,
+          "coded_width": 1920,
+          "coded_height": 1088,
+          "has_b_frames": 0,
+          "sample_aspect_ratio": "1:1",
+          "display_aspect_ratio": "16:9",
+          "pix_fmt": "yuv420p",
+          "level": 31,
+          "chroma_location": "left",
+          "refs": 1,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "r_frame_rate": "24000/1001",
+          "avg_frame_rate": "2835000/118243",
+          "time_base": "1/90000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 450450,
+          "duration": "5.005000",
+          "bit_rate": "2030705",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "126",
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler"
+          }
+        }
+      ],
+      "format": {
+        "filename": "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4",
+        "nb_streams": 1,
+        "nb_programs": 0,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "format_long_name": "QuickTime / MOV",
+        "start_time": "0.000000",
+        "duration": "5.256000",
+        "size": "1335908",
+        "bit_rate": "2033345",
+        "probe_score": 100,
+        "tags": {
+          "major_brand": "isom",
+          "minor_version": "512",
+          "compatible_brands": "isomiso2avc1mp41",
+          "title": "No Name",
+          "encoder": "Lavf58.29.100"
+        }
+      }
+    }
+  },
+  "before": [
+    {
+      "id": "a8a63e4ed4265a551b3b742032c2b6a2bc33ca4cf13367eecc97612b96445200",
+      "name": "/video-analytics-midterm-adaface-roi-worker",
+      "image": "sha256:2197771e3f8eb9cd7e6b21ef690b7efa971b85623ce4ed93b0baea14df296c4a",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:51.548832115Z",
+      "finished_at": "2026-10-13T00:06:02.26607163Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "8ef5573e10cf1b75946634ac4fe844c1c6d5983c0b0fe3003a89d297b8343255"
+    },
+    {
+      "id": "e3e43fca89eb1be1bb6a2f8348c43447d1351952702c1ca90ad69831a6fe1482",
+      "name": "/video-analytics-midterm-analysis-forwarder",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.213876058Z",
+      "finished_at": "2026-10-13T02:03:45.889458786Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "853434d612a1cfabb8ca8048eb88dbc355e18b2e1451610f6d9f52b193ce0a19"
+    },
+    {
+      "id": "7e5306e0ea60a28f2111db5a3ba5b70059be3b70a63648f10ca7a0febfa139e5",
+      "name": "/video-analytics-midterm-analysis-forwarder-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "created",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "0001-01-01T00:00:00Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "fc85c214bccdb3c146ed7f10acf5aa2e9d647b5fc2f6e03da653f3b2853af6df"
+    },
+    {
+      "id": "0762dec4a8fd69be528286876fd90e8bc375609584542c8d5fe0006854632356",
+      "name": "/video-analytics-midterm-analysis-forwarder-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "created",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "0001-01-01T00:00:00Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "5d097008f1e7a47dff642ae856e40a72b0d2a77aa107dea45f41b8aa22b4cb5a"
+    },
+    {
+      "id": "fa07af6a41077f133f28c99effe35d8e8965c386bb7a1b0cf3f2d608b2df3a2b",
+      "name": "/video-analytics-midterm-api",
+      "image": "sha256:19648e5fa425b4607089ebdddd6a9c3e44065f8fa66fb314da63802969ef8dc6",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.716518663Z",
+      "finished_at": "2026-10-13T02:03:46.431530752Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models-savant-b",
+          "Destination": "/data/video-analytics/models-savant-b",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/app/modules/savant_security",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/var/run/docker.sock",
+          "Destination": "/var/run/docker.sock",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/api",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/face_trajectory_cache",
+          "Destination": "/data/video-analytics/media/face_trajectory_cache",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "3663e604790b6e2e3bc4d2efc17d995ea7a6609b9f68c32c7587fd8759ebbd97"
+    },
+    {
+      "id": "a010c7e021809c9437748aa4abe9b078be75d1be4d88bc6283c521aea4c7c7f4",
+      "name": "/video-analytics-midterm-clip-worker",
+      "image": "sha256:12bdd5100ea86b13a0274b33db2eb178191f0b1b6ca21b7e01e189800e8a9e1a",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.682639225Z",
+      "finished_at": "2026-10-15T09:44:54.952140311Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/clip-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "110b93382b7016bd36c1e42050ba2d3b34b63c83bbc65a49c3e05815fb377ec3"
+    },
+    {
+      "id": "acfd0be36deeccebe5a6babf4bee8650cec52b74606d9331f3eeb4013738c06a",
+      "name": "/video-analytics-midterm-cuda-mps-operator",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-07-15T10:54:50.696197915Z",
+      "finished_at": "2026-07-15T15:13:34.378267085Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a07e7caa337dbec0f96c6f791d0feadbc77bafd0833245511d4634ceaac563"
+    },
+    {
+      "id": "ae1e5ddd4bb34e6f725b4bfb919c06b51858f1f4ed987c690fc8a77e94c6017f",
+      "name": "/video-analytics-midterm-event-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.686211632Z",
+      "finished_at": "2026-10-15T09:44:53.891129557Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "ac1b3e625a4700ae36f6c801606e89ab1e9111f164aafd849642c0c9d1d7ded2"
+    },
+    {
+      "id": "53a1b55ea0faaba73b27fa9fc6be7a4a53484fb1300b1213f0271bb2da4b3dda",
+      "name": "/video-analytics-midterm-evidence-viewer",
+      "image": "sha256:2cb88aee7ee5a7d764fd6a2beca2cf33ef373cb955860ebdddf1726d232cb7c0",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.44921354Z",
+      "finished_at": "2026-10-15T09:44:46.101564984Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/evidence-viewer",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/app/modules/savant_security/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/evidence",
+          "Destination": "/evidence",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "7979a46edd73bf1df6325fdf25a40ba592dd725a98f70fd670824cede6909724"
+    },
+    {
+      "id": "3d9d4dcf842d2c0c52f987973c432e13f41036cec571abb2e39eab59405b6bf0",
+      "name": "/video-analytics-midterm-face-worker",
+      "image": "sha256:7be0bd8d4c1e9e71b115275bd02ffef9f29fe7b0e9f6278b96806fdad71befe0",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.182933634Z",
+      "finished_at": "2026-10-15T09:44:54.30142804Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/face-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/face_trajectories",
+          "Destination": "/data/video-analytics/media/face_trajectories",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "6,14",
+      "environment_sha256": "2579902156bc407e39d069e92cee28aed7e47d41ea919304841887611d54cd8a"
+    },
+    {
+      "id": "6e2cc8f01f5ad4e195a0d9fa01dc022155228a13ab4024a459780f471b58a7cd",
+      "name": "/video-analytics-midterm-media-worker",
+      "image": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.663775262Z",
+      "finished_at": "2026-10-15T09:44:55.151095456Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/opt/savant/src/module/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/media-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "2902da0d1d76aa878362364a34479d3134bdcb2b6159eeb81bcf949cb55ecdc2"
+    },
+    {
+      "id": "18ee0f1f609bbb17b2829f7c88030a43fee1ae2cdf2707db2b405f969223c916",
+      "name": "/video-analytics-midterm-person-observation-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.023575474Z",
+      "finished_at": "2026-10-15T09:44:54.560689448Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "15",
+      "environment_sha256": "ade7aee91c500fa8923080d6b15adb732306d1e616fc327a06a362f9f9d08261"
+    },
+    {
+      "id": "48325468f085f049bef9ece4fdbfd57f35566d8646d2aef373476190d328d34a",
+      "name": "/video-analytics-midterm-postgres",
+      "image": "sha256:b295c2aa92725ecaaa58ffb6664035b45076318d8ca93ae4a9b0994481862f7d",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:50.372001744Z",
+      "finished_at": "2026-10-13T02:03:45.881407092Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/db/migrations",
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/postgres-midterm",
+          "Destination": "/var/lib/postgresql/data",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "e842da98ec14b8d22ac4c54a12c9954d4a8a69fba6b875d998ff42b60305152e"
+    },
+    {
+      "id": "5c6da50a69f516eeb08fe44e5461deaeb43d5df92240e016689e841d79a46ce8",
+      "name": "/video-analytics-midterm-redis",
+      "image": "sha256:487efc0616382465781b8fdc3d6d1db449e6fd80ae23bf48432a2da6b6929908",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.206203271Z",
+      "finished_at": "2026-10-15T09:44:46.101708692Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b",
+          "Source": "/home/docker-data/volumes/43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b0d41ad25e5eaaf314ea86e631a7364d75aa3f7efab4ce94c92a603f2d55b3b7"
+    },
+    {
+      "id": "1989d78d4eb9d7c47de1e80c5d12f386e398c15ee31dc73f9ee297314a32c6ad",
+      "name": "/video-analytics-midterm-replay-a",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:20.695641351Z",
+      "finished_at": "2026-07-15T15:13:05.539015878Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-a.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-a",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "69bdad6e032830db53b820b3bcbfca98f0976477edddebfe8fc912934517f922"
+    },
+    {
+      "id": "c0ba0b6ff043ad1ec2ce85d0fe84ed83fa4117ef1bd53d27acbbfa17c1ae6ea3",
+      "name": "/video-analytics-midterm-replay-b",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:36.415039661Z",
+      "finished_at": "2026-07-15T15:13:16.119299936Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-b.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-b",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "96454d65427928d28e4c24981ce5b7ab9cc31a2931647ecef4ff199ec09df5ff"
+    },
+    {
+      "id": "60370a9fcc86a95f555618d805325d3c88438958dc8ff28ddf98fef4fefee2e4",
+      "name": "/video-analytics-midterm-replay-raw-fanout",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:47.723401886Z",
+      "finished_at": "2026-10-13T02:03:46.160051236Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "636f810d45a48ddebd93c1bac87b58ea86220dd66f5953198c215ac6c975650b"
+    },
+    {
+      "id": "5b58872659ce461f6d294189cf7f0ba78917bcda0f2b9e45a6adee2d9ffdd9bc",
+      "name": "/video-analytics-midterm-replay-raw-fanout-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:54.0228586Z",
+      "finished_at": "2026-10-13T00:06:01.189407304Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "1d790cab5f3ad37464714e23ae75972400ec6c2ccb403c3418792002a645c1ff"
+    },
+    {
+      "id": "bc66e5ceb995ddd24abe70036eca1a2af91589b26a8fe8975af4233feba0f646",
+      "name": "/video-analytics-midterm-replay-raw-fanout-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:54.115196424Z",
+      "finished_at": "2026-10-13T00:06:01.287326789Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7f551fbe6aed0da62a0a5b265a8ea706dd95b9d78a9339f63683e13997375611"
+    },
+    {
+      "id": "32f6d762f388c875da2794a81a951ae1bff881e2c6cf08e36a179b8beae41256",
+      "name": "/video-analytics-midterm-replay-service",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:47.521379865Z",
+      "finished_at": "2026-10-15T09:44:46.101547285Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "69bdad6e032830db53b820b3bcbfca98f0976477edddebfe8fc912934517f922"
+    },
+    {
+      "id": "fd1763770f14fdb65e1d4f043f6b90cb7706025298cb7932a2f56d768b66bd3b",
+      "name": "/video-analytics-midterm-rolling-cache-sink-a",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.900981539Z",
+      "finished_at": "2026-10-13T02:03:46.019051294Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "4fc9bd867252a211c9ad7fa9e74b26a0e276971e091c9d6494395513f5d6e576"
+    },
+    {
+      "id": "1312a9ce9d2c58ea44c9aa924ab74a2cb45fda6a4d1a5584e7bf730d953cb4b3",
+      "name": "/video-analytics-midterm-rolling-cache-sink-b",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.242987935Z",
+      "finished_at": "2026-10-13T02:03:46.068356864Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "79c3273dd6749ef3051d1bb0f6fd3bd1ac6ff25a36e0bcb5f5e31147b9d84ead"
+    },
+    {
+      "id": "4bac0d99faecb750c42a828677a74708625eaef6e7bd1cc656518ab1e69c4690",
+      "name": "/video-analytics-midterm-savant",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:55.352024681Z",
+      "finished_at": "2026-10-13T02:03:47.599026882Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "bf3e4fc29b8781d78740ca5bddde3b01e5cb7f65ec44f7757447c241e46d6c68"
+    },
+    {
+      "id": "f3bfc6356a808cd1cdddc4bee156fd3b6c60cd986fb0425caf52c222731a60d4",
+      "name": "/video-analytics-midterm-savant-a",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:52.405152424Z",
+      "finished_at": "2026-10-13T00:06:04.831772132Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1cff3ef593b20ab27fb308fc830de86037709ef61e3ee155005be0e096ed837f"
+    },
+    {
+      "id": "c2486f6c7d57528658073a4a16c13deed5c4fcea0241f60c221f5c79afdfcd79",
+      "name": "/video-analytics-midterm-savant-b",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:53.502593967Z",
+      "finished_at": "2026-10-13T00:06:05.814522762Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "470bdb0c112cce69f3ffe3f4f8252ec84417b17646814db0cd83a0238793d874"
+    },
+    {
+      "id": "fbe544ecada3e0883f7ada33f2e720e07b2f144514429dbea2e69badd24ae8cb",
+      "name": "/video-analytics-midterm-video-file-sink",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:50.367946335Z",
+      "finished_at": "2026-10-13T02:03:45.879593435Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "004f987b4d935b4165558119cdcdb7539e6dff3fff433408430aad9e71c60000"
+    },
+    {
+      "id": "7c34133138b43b4812a8107c0811524ce6136dc8e8f3a52fb5827dbedf2e8766",
+      "name": "/video-analytics-midterm-video-file-sink-a",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:21.068305289Z",
+      "finished_at": "2026-07-15T15:13:22.389307333Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "24b94f6509d5199479717dfcdaf1952159ba0f61985c30d0e3312dd98233bf50"
+    },
+    {
+      "id": "82e8a1237241b2c14e261bf275e268ab93e9cd2212fc66dfb2af9114a1ade294",
+      "name": "/video-analytics-midterm-video-file-sink-b",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:36.795203673Z",
+      "finished_at": "2026-07-15T15:13:23.038873551Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "3e8573612fa96762863c5760807b50b2fd67956a24082b976a8fa58ee032e59e"
+    },
+    {
+      "id": "e445e6cbdb486e5bcbdfa01fb50147ebb848c935b4ec1a038ffb216d9eff50df",
+      "name": "/video-analytics-midterm-video-file-sink-pressure-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-10-09T16:57:44.473272552Z",
+      "finished_at": "2026-10-09T17:02:26.517665139Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b5b5b57252ab497c8578480d2c425589849125600669665acf77be3506d6b6b0"
+    },
+    {
+      "id": "61c145125bf6aae7e58c3e8af796e0db6f356461dfc3fe7834c7b6f453b7687c",
+      "name": "/video-analytics-midterm-video-file-sink-pressure1h-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-10-09T19:18:32.504261755Z",
+      "finished_at": "2026-10-09T19:21:11.517842028Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f60a751e95c1b14d8c4decafa1e2c299df7ddf7b35e04a3ee3bf20f31b7ea949"
+    }
+  ],
+  "rounds": [
+    {
+      "label": "live_unknown_bitrate",
+      "command": [
+        "/usr/bin/python3",
+        "scripts/runtime/run_midterm_pressure60.py",
+        "--preflight-only",
+        "--compose-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env",
+        "--artifact-root",
+        "/tmp/pressure60-phase1-preflight-20261015/artifacts",
+        "--dual-shard-same-gpu",
+        "--rolling-cache-evidence",
+        "--streams",
+        "60",
+        "--fps",
+        "4/1",
+        "--min-fps",
+        "99/25",
+        "--duration-s",
+        "3600",
+        "--drain-s",
+        "300",
+        "--pressure-rolling-cache-retention-s",
+        "600",
+        "--evidence-policy-groups",
+        "5:5",
+        "--evidence-group-size",
+        "60",
+        "--pressure-algorithm-cooldown-s",
+        "60",
+        "--media-worker-materialization-max-active",
+        "4",
+        "--media-worker-finalizer-workers",
+        "4",
+        "--media-worker-finalizer-queue-capacity",
+        "4",
+        "--media-worker-rolling-remux-workers",
+        "1",
+        "--face-infer-interval",
+        "3",
+        "--face-embedding-infer-interval",
+        "3",
+        "--analysis-max-queue-age-ms",
+        "30000",
+        "--adaface-roi-redis",
+        "--savant-output-mode",
+        "metadata-only",
+        "--run-id",
+        "phase1_preflight_20261015_live_unknown_bitrate",
+        "--rtsp-republish-input-uri",
+        "rtsp://192.168.1.105:8554/live/1080movie"
+      ],
+      "cwd": "/tmp/pressure60-phase1-preflight-20261015",
+      "process_environment": {},
+      "started": {
+        "utc": "2026-10-15T12:07:10.253664+00:00",
+        "kst": "2026-10-15T21:07:10.253679+09:00"
+      },
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 119, in pressure_storage_preflight\n    sources = parse_compose_cache_sources(rendered, sink_services)\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_guard.py\", line 40, in parse_compose_cache_sources\n    raise StoragePreflightError(f\"missing compose service: {service}\")\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 16488, in <module>\n    raise SystemExit(main())\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1761, in main\n    storage_report, rendered_pressure_config = perform_storage_preflight(cfg)\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1289, in perform_storage_preflight\n    pressure_override_files=overrides,\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 178, in pressure_storage_preflight\n    raise StoragePreflightError(str(exc), report) from exc\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n",
+      "completed": {
+        "utc": "2026-10-15T12:07:11.083119+00:00",
+        "kst": "2026-10-15T21:07:11.083136+09:00"
+      }
+    },
+    {
+      "label": "nvme",
+      "command": [
+        "/usr/bin/python3",
+        "scripts/runtime/run_midterm_pressure60.py",
+        "--preflight-only",
+        "--compose-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env",
+        "--artifact-root",
+        "/tmp/pressure60-phase1-preflight-20261015/artifacts",
+        "--dual-shard-same-gpu",
+        "--rolling-cache-evidence",
+        "--streams",
+        "60",
+        "--fps",
+        "4/1",
+        "--min-fps",
+        "99/25",
+        "--duration-s",
+        "3600",
+        "--drain-s",
+        "300",
+        "--pressure-rolling-cache-retention-s",
+        "600",
+        "--evidence-policy-groups",
+        "5:5",
+        "--evidence-group-size",
+        "60",
+        "--pressure-algorithm-cooldown-s",
+        "60",
+        "--media-worker-materialization-max-active",
+        "4",
+        "--media-worker-finalizer-workers",
+        "4",
+        "--media-worker-finalizer-queue-capacity",
+        "4",
+        "--media-worker-rolling-remux-workers",
+        "1",
+        "--face-infer-interval",
+        "3",
+        "--face-embedding-infer-interval",
+        "3",
+        "--analysis-max-queue-age-ms",
+        "30000",
+        "--adaface-roi-redis",
+        "--savant-output-mode",
+        "metadata-only",
+        "--run-id",
+        "phase1_preflight_20261015_nvme",
+        "--rtsp-republish-input-uri",
+        "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4"
+      ],
+      "cwd": "/tmp/pressure60-phase1-preflight-20261015",
+      "process_environment": {},
+      "started": {
+        "utc": "2026-10-15T12:07:11.085296+00:00",
+        "kst": "2026-10-15T21:07:11.085304+09:00"
+      },
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 119, in pressure_storage_preflight\n    sources = parse_compose_cache_sources(rendered, sink_services)\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_guard.py\", line 40, in parse_compose_cache_sources\n    raise StoragePreflightError(f\"missing compose service: {service}\")\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 16488, in <module>\n    raise SystemExit(main())\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1761, in main\n    storage_report, rendered_pressure_config = perform_storage_preflight(cfg)\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1289, in perform_storage_preflight\n    pressure_override_files=overrides,\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 178, in pressure_storage_preflight\n    raise StoragePreflightError(str(exc), report) from exc\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n",
+      "completed": {
+        "utc": "2026-10-15T12:07:11.914501+00:00",
+        "kst": "2026-10-15T21:07:11.914518+09:00"
+      }
+    },
+    {
+      "label": "rotational",
+      "command": [
+        "/usr/bin/python3",
+        "scripts/runtime/run_midterm_pressure60.py",
+        "--preflight-only",
+        "--compose-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/docker-compose.midterm.yml",
+        "--env-file",
+        "/tmp/pressure60-phase1-preflight-20261015/infra/env/midterm.env",
+        "--artifact-root",
+        "/tmp/pressure60-phase1-preflight-20261015/artifacts",
+        "--dual-shard-same-gpu",
+        "--rolling-cache-evidence",
+        "--streams",
+        "60",
+        "--fps",
+        "4/1",
+        "--min-fps",
+        "99/25",
+        "--duration-s",
+        "3600",
+        "--drain-s",
+        "300",
+        "--pressure-rolling-cache-retention-s",
+        "600",
+        "--evidence-policy-groups",
+        "5:5",
+        "--evidence-group-size",
+        "60",
+        "--pressure-algorithm-cooldown-s",
+        "60",
+        "--media-worker-materialization-max-active",
+        "4",
+        "--media-worker-finalizer-workers",
+        "4",
+        "--media-worker-finalizer-queue-capacity",
+        "4",
+        "--media-worker-rolling-remux-workers",
+        "1",
+        "--face-infer-interval",
+        "3",
+        "--face-embedding-infer-interval",
+        "3",
+        "--analysis-max-queue-age-ms",
+        "30000",
+        "--adaface-roi-redis",
+        "--savant-output-mode",
+        "metadata-only",
+        "--run-id",
+        "phase1_preflight_20261015_rotational",
+        "--rtsp-republish-input-uri",
+        "/tmp/pressure60-phase1-preflight-20261015/preflight-input.mp4"
+      ],
+      "cwd": "/tmp/pressure60-phase1-preflight-20261015",
+      "process_environment": {
+        "ROLLING_CACHE_HOST_ROOT": "/data/video-analytics/media/rolling-cache",
+        "ROLLING_CACHE_MATERIALIZED_HOST_ROOT": "/data/video-analytics/media/rolling-cache-materialized"
+      },
+      "started": {
+        "utc": "2026-10-15T12:07:11.916757+00:00",
+        "kst": "2026-10-15T21:07:11.916765+09:00"
+      },
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 119, in pressure_storage_preflight\n    sources = parse_compose_cache_sources(rendered, sink_services)\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_guard.py\", line 40, in parse_compose_cache_sources\n    raise StoragePreflightError(f\"missing compose service: {service}\")\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 16488, in <module>\n    raise SystemExit(main())\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1761, in main\n    storage_report, rendered_pressure_config = perform_storage_preflight(cfg)\n  File \"scripts/runtime/run_midterm_pressure60.py\", line 1289, in perform_storage_preflight\n    pressure_override_files=overrides,\n  File \"/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py\", line 178, in pressure_storage_preflight\n    raise StoragePreflightError(str(exc), report) from exc\npressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a\n",
+      "completed": {
+        "utc": "2026-10-15T12:07:12.743297+00:00",
+        "kst": "2026-10-15T21:07:12.743314+09:00"
+      }
+    }
+  ],
+  "after": [
+    {
+      "id": "a8a63e4ed4265a551b3b742032c2b6a2bc33ca4cf13367eecc97612b96445200",
+      "name": "/video-analytics-midterm-adaface-roi-worker",
+      "image": "sha256:2197771e3f8eb9cd7e6b21ef690b7efa971b85623ce4ed93b0baea14df296c4a",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:51.548832115Z",
+      "finished_at": "2026-10-13T00:06:02.26607163Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "8ef5573e10cf1b75946634ac4fe844c1c6d5983c0b0fe3003a89d297b8343255"
+    },
+    {
+      "id": "e3e43fca89eb1be1bb6a2f8348c43447d1351952702c1ca90ad69831a6fe1482",
+      "name": "/video-analytics-midterm-analysis-forwarder",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.213876058Z",
+      "finished_at": "2026-10-13T02:03:45.889458786Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "853434d612a1cfabb8ca8048eb88dbc355e18b2e1451610f6d9f52b193ce0a19"
+    },
+    {
+      "id": "7e5306e0ea60a28f2111db5a3ba5b70059be3b70a63648f10ca7a0febfa139e5",
+      "name": "/video-analytics-midterm-analysis-forwarder-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "created",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "0001-01-01T00:00:00Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "fc85c214bccdb3c146ed7f10acf5aa2e9d647b5fc2f6e03da653f3b2853af6df"
+    },
+    {
+      "id": "0762dec4a8fd69be528286876fd90e8bc375609584542c8d5fe0006854632356",
+      "name": "/video-analytics-midterm-analysis-forwarder-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "created",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "0001-01-01T00:00:00Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "5d097008f1e7a47dff642ae856e40a72b0d2a77aa107dea45f41b8aa22b4cb5a"
+    },
+    {
+      "id": "fa07af6a41077f133f28c99effe35d8e8965c386bb7a1b0cf3f2d608b2df3a2b",
+      "name": "/video-analytics-midterm-api",
+      "image": "sha256:19648e5fa425b4607089ebdddd6a9c3e44065f8fa66fb314da63802969ef8dc6",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.716518663Z",
+      "finished_at": "2026-10-13T02:03:46.431530752Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/api",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/face_trajectory_cache",
+          "Destination": "/data/video-analytics/media/face_trajectory_cache",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/var/run/docker.sock",
+          "Destination": "/var/run/docker.sock",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/app/modules/savant_security",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models-savant-b",
+          "Destination": "/data/video-analytics/models-savant-b",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "3663e604790b6e2e3bc4d2efc17d995ea7a6609b9f68c32c7587fd8759ebbd97"
+    },
+    {
+      "id": "a010c7e021809c9437748aa4abe9b078be75d1be4d88bc6283c521aea4c7c7f4",
+      "name": "/video-analytics-midterm-clip-worker",
+      "image": "sha256:12bdd5100ea86b13a0274b33db2eb178191f0b1b6ca21b7e01e189800e8a9e1a",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.682639225Z",
+      "finished_at": "2026-10-15T09:44:54.952140311Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/clip-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/config",
+          "Destination": "/app/infra/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "110b93382b7016bd36c1e42050ba2d3b34b63c83bbc65a49c3e05815fb377ec3"
+    },
+    {
+      "id": "acfd0be36deeccebe5a6babf4bee8650cec52b74606d9331f3eeb4013738c06a",
+      "name": "/video-analytics-midterm-cuda-mps-operator",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-07-15T10:54:50.696197915Z",
+      "finished_at": "2026-07-15T15:13:34.378267085Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "c2a07e7caa337dbec0f96c6f791d0feadbc77bafd0833245511d4634ceaac563"
+    },
+    {
+      "id": "ae1e5ddd4bb34e6f725b4bfb919c06b51858f1f4ed987c690fc8a77e94c6017f",
+      "name": "/video-analytics-midterm-event-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.686211632Z",
+      "finished_at": "2026-10-15T09:44:53.891129557Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "ac1b3e625a4700ae36f6c801606e89ab1e9111f164aafd849642c0c9d1d7ded2"
+    },
+    {
+      "id": "53a1b55ea0faaba73b27fa9fc6be7a4a53484fb1300b1213f0271bb2da4b3dda",
+      "name": "/video-analytics-midterm-evidence-viewer",
+      "image": "sha256:2cb88aee7ee5a7d764fd6a2beca2cf33ef373cb955860ebdddf1726d232cb7c0",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.44921354Z",
+      "finished_at": "2026-10-15T09:44:46.101564984Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/app/modules/savant_security/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/evidence",
+          "Destination": "/evidence",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/evidence-viewer",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/infra/generated",
+          "Destination": "/app/infra/generated",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "7979a46edd73bf1df6325fdf25a40ba592dd725a98f70fd670824cede6909724"
+    },
+    {
+      "id": "3d9d4dcf842d2c0c52f987973c432e13f41036cec571abb2e39eab59405b6bf0",
+      "name": "/video-analytics-midterm-face-worker",
+      "image": "sha256:7be0bd8d4c1e9e71b115275bd02ffef9f29fe7b0e9f6278b96806fdad71befe0",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.182933634Z",
+      "finished_at": "2026-10-15T09:44:54.30142804Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/face-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media/face_trajectories",
+          "Destination": "/data/video-analytics/media/face_trajectories",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/data/video-analytics/models",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "6,14",
+      "environment_sha256": "2579902156bc407e39d069e92cee28aed7e47d41ea919304841887611d54cd8a"
+    },
+    {
+      "id": "6e2cc8f01f5ad4e195a0d9fa01dc022155228a13ab4024a459780f471b58a7cd",
+      "name": "/video-analytics-midterm-media-worker",
+      "image": "sha256:80223820d79c536057d059c42f4883cc1bedf34c9793d90732538e7bc31d04be",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.663775262Z",
+      "finished_at": "2026-10-15T09:44:55.151095456Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/media-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/config",
+          "Destination": "/opt/savant/src/module/config",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "2902da0d1d76aa878362364a34479d3134bdcb2b6159eeb81bcf949cb55ecdc2"
+    },
+    {
+      "id": "18ee0f1f609bbb17b2829f7c88030a43fee1ae2cdf2707db2b405f969223c916",
+      "name": "/video-analytics-midterm-person-observation-worker",
+      "image": "sha256:fbbb06ff34e27654f5f67e00fdded44fadef6bdd51d07fefe34310a756bd1f2c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:56.023575474Z",
+      "finished_at": "2026-10-15T09:44:54.560689448Z",
+      "restart_count": 1,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/event-worker",
+          "Destination": "/app",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/libs",
+          "Destination": "/app/libs",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "15",
+      "environment_sha256": "ade7aee91c500fa8923080d6b15adb732306d1e616fc327a06a362f9f9d08261"
+    },
+    {
+      "id": "48325468f085f049bef9ece4fdbfd57f35566d8646d2aef373476190d328d34a",
+      "name": "/video-analytics-midterm-postgres",
+      "image": "sha256:b295c2aa92725ecaaa58ffb6664035b45076318d8ca93ae4a9b0994481862f7d",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:50.372001744Z",
+      "finished_at": "2026-10-13T02:03:45.881407092Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/db/migrations",
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/postgres-midterm",
+          "Destination": "/var/lib/postgresql/data",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "e842da98ec14b8d22ac4c54a12c9954d4a8a69fba6b875d998ff42b60305152e"
+    },
+    {
+      "id": "5c6da50a69f516eeb08fe44e5461deaeb43d5df92240e016689e841d79a46ce8",
+      "name": "/video-analytics-midterm-redis",
+      "image": "sha256:487efc0616382465781b8fdc3d6d1db449e6fd80ae23bf48432a2da6b6929908",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:49.206203271Z",
+      "finished_at": "2026-10-15T09:44:46.101708692Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b",
+          "Source": "/home/docker-data/volumes/43cf9a82c913b47da86617c80527e655c7a6967e66f38978854317a9092ab56b/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b0d41ad25e5eaaf314ea86e631a7364d75aa3f7efab4ce94c92a603f2d55b3b7"
+    },
+    {
+      "id": "1989d78d4eb9d7c47de1e80c5d12f386e398c15ee31dc73f9ee297314a32c6ad",
+      "name": "/video-analytics-midterm-replay-a",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:20.695641351Z",
+      "finished_at": "2026-07-15T15:13:05.539015878Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-a.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-a",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "69bdad6e032830db53b820b3bcbfca98f0976477edddebfe8fc912934517f922"
+    },
+    {
+      "id": "c0ba0b6ff043ad1ec2ce85d0fe84ed83fa4117ef1bd53d27acbbfa17c1ae6ea3",
+      "name": "/video-analytics-midterm-replay-b",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:36.415039661Z",
+      "finished_at": "2026-07-15T15:13:16.119299936Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm-b",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.replay-b.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "96454d65427928d28e4c24981ce5b7ab9cc31a2931647ecef4ff199ec09df5ff"
+    },
+    {
+      "id": "60370a9fcc86a95f555618d805325d3c88438958dc8ff28ddf98fef4fefee2e4",
+      "name": "/video-analytics-midterm-replay-raw-fanout",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:47.723401886Z",
+      "finished_at": "2026-10-13T02:03:46.160051236Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "636f810d45a48ddebd93c1bac87b58ea86220dd66f5953198c215ac6c975650b"
+    },
+    {
+      "id": "5b58872659ce461f6d294189cf7f0ba78917bcda0f2b9e45a6adee2d9ffdd9bc",
+      "name": "/video-analytics-midterm-replay-raw-fanout-a",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:54.0228586Z",
+      "finished_at": "2026-10-13T00:06:01.189407304Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "1d790cab5f3ad37464714e23ae75972400ec6c2ccb403c3418792002a645c1ff"
+    },
+    {
+      "id": "bc66e5ceb995ddd24abe70036eca1a2af91589b26a8fe8975af4233feba0f646",
+      "name": "/video-analytics-midterm-replay-raw-fanout-b",
+      "image": "sha256:8d6d6feb465c8c05f3be56d36809f59292d3add3fa41c9eb0b67eaf0f2e14cd9",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:54.115196424Z",
+      "finished_at": "2026-10-13T00:06:01.287326789Z",
+      "restart_count": 0,
+      "mounts": [],
+      "cpuset": "",
+      "environment_sha256": "7f551fbe6aed0da62a0a5b265a8ea706dd95b9d78a9339f63683e13997375611"
+    },
+    {
+      "id": "32f6d762f388c875da2794a81a951ae1bff881e2c6cf08e36a179b8beae41256",
+      "name": "/video-analytics-midterm-replay-service",
+      "image": "sha256:bc12fb5e433cbd02ee625a619e046a4704c1fe912435644718c6fe693a0f2b38",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:47.521379865Z",
+      "finished_at": "2026-10-15T09:44:46.101547285Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_replay/config.midterm.json",
+          "Destination": "/opt/etc/config.json",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics-fast/replay-midterm",
+          "Destination": "/opt/rocksdb",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "69bdad6e032830db53b820b3bcbfca98f0976477edddebfe8fc912934517f922"
+    },
+    {
+      "id": "fd1763770f14fdb65e1d4f043f6b90cb7706025298cb7932a2f56d768b66bd3b",
+      "name": "/video-analytics-midterm-rolling-cache-sink-a",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.900981539Z",
+      "finished_at": "2026-10-13T02:03:46.019051294Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "4fc9bd867252a211c9ad7fa9e74b26a0e276971e091c9d6494395513f5d6e576"
+    },
+    {
+      "id": "1312a9ce9d2c58ea44c9aa924ab74a2cb45fda6a4d1a5584e7bf730d953cb4b3",
+      "name": "/video-analytics-midterm-rolling-cache-sink-b",
+      "image": "sha256:ff60518a25f4493b004e82d7c03c87afde60ce0e786fb96413beaf6e66e5b37c",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:54.242987935Z",
+      "finished_at": "2026-10-13T02:03:46.068356864Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_maintenance.py",
+          "Destination": "/opt/rolling-cache-maintenance.py",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/rolling_cache_sink_entrypoint.sh",
+          "Destination": "/opt/rolling-cache-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/services/rolling-cache-sink/app",
+          "Destination": "/opt/rolling-cache-sink/app",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "79c3273dd6749ef3051d1bb0f6fd3bd1ac6ff25a36e0bcb5f5e31147b9d84ead"
+    },
+    {
+      "id": "4bac0d99faecb750c42a828677a74708625eaef6e7bd1cc656518ab1e69c4690",
+      "name": "/video-analytics-midterm-savant",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:55.352024681Z",
+      "finished_at": "2026-10-13T02:03:47.599026882Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "bf3e4fc29b8781d78740ca5bddde3b01e5cb7f65ec44f7757447c241e46d6c68"
+    },
+    {
+      "id": "f3bfc6356a808cd1cdddc4bee156fd3b6c60cd986fb0425caf52c222731a60d4",
+      "name": "/video-analytics-midterm-savant-a",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:52.405152424Z",
+      "finished_at": "2026-10-13T00:06:04.831772132Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "1cff3ef593b20ab27fb308fc830de86037709ef61e3ee155005be0e096ed837f"
+    },
+    {
+      "id": "c2486f6c7d57528658073a4a16c13deed5c4fcea0241f60c221f5c79afdfcd79",
+      "name": "/video-analytics-midterm-savant-b",
+      "image": "sha256:1592d687ebb0c3c24ad56ce392ed590193fd0a404d7474b21c13c1945e327bdd",
+      "status": "exited",
+      "started_at": "2026-10-12T21:30:53.502593967Z",
+      "finished_at": "2026-10-13T00:06:05.814522762Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/tmp/video-analytics-mps",
+          "Destination": "/tmp/video-analytics-mps",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/artifacts",
+          "Destination": "/data/video-analytics/artifacts",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/data/video-analytics/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/downloads",
+          "Destination": "/downloads",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/models",
+          "Destination": "/models",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security/poc_deps",
+          "Destination": "/opt/savant/poc_deps",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/modules/savant_security",
+          "Destination": "/opt/savant/src/module",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "470bdb0c112cce69f3ffe3f4f8252ec84417b17646814db0cd83a0238793d874"
+    },
+    {
+      "id": "fbe544ecada3e0883f7ada33f2e720e07b2f144514429dbea2e69badd24ae8cb",
+      "name": "/video-analytics-midterm-video-file-sink",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "running",
+      "started_at": "2026-10-15T09:44:50.367946335Z",
+      "finished_at": "2026-10-13T02:03:45.879593435Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "004f987b4d935b4165558119cdcdb7539e6dff3fff433408430aad9e71c60000"
+    },
+    {
+      "id": "7c34133138b43b4812a8107c0811524ce6136dc8e8f3a52fb5827dbedf2e8766",
+      "name": "/video-analytics-midterm-video-file-sink-a",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:21.068305289Z",
+      "finished_at": "2026-07-15T15:13:22.389307333Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "24b94f6509d5199479717dfcdaf1952159ba0f61985c30d0e3312dd98233bf50"
+    },
+    {
+      "id": "82e8a1237241b2c14e261bf275e268ab93e9cd2212fc66dfb2af9114a1ade294",
+      "name": "/video-analytics-midterm-video-file-sink-b",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-07-15T10:55:36.795203673Z",
+      "finished_at": "2026-07-15T15:13:23.038873551Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/user/video-analytics/scripts/runtime/video_file_sink_entrypoint.sh",
+          "Destination": "/opt/video-file-sink-entrypoint.sh",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "3e8573612fa96762863c5760807b50b2fd67956a24082b976a8fa58ee032e59e"
+    },
+    {
+      "id": "e445e6cbdb486e5bcbdfa01fb50147ebb848c935b4ec1a038ffb216d9eff50df",
+      "name": "/video-analytics-midterm-video-file-sink-pressure-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-10-09T16:57:44.473272552Z",
+      "finished_at": "2026-10-09T17:02:26.517665139Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "b5b5b57252ab497c8578480d2c425589849125600669665acf77be3506d6b6b0"
+    },
+    {
+      "id": "61c145125bf6aae7e58c3e8af796e0db6f356461dfc3fe7834c7b6f453b7687c",
+      "name": "/video-analytics-midterm-video-file-sink-pressure1h-rollback-backup",
+      "image": "sha256:9f76190fbf6733a6665d5077b8c33a93784f87ff761669ff3db9aecab097be02",
+      "status": "exited",
+      "started_at": "2026-10-09T19:18:32.504261755Z",
+      "finished_at": "2026-10-09T19:21:11.517842028Z",
+      "restart_count": 0,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/data/video-analytics/media",
+          "Destination": "/media",
+          "Mode": "rw",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ],
+      "cpuset": "",
+      "environment_sha256": "f60a751e95c1b14d8c4decafa1e2c299df7ddf7b35e04a3ee3bf20f31b7ea949"
+    }
+  ],
+  "formal_container_snapshot_unchanged": false,
+  "completed": {
+    "utc": "2026-10-15T12:07:12.809383+00:00",
+    "kst": "2026-10-15T21:07:12.809399+09:00"
+  }
+}

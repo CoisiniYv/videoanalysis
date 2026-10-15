@@ -1,0 +1,4 @@
+# Preserve raw pytest tracebacks and CSV line endings.
+*.xml -whitespace
+*.csv -whitespace
+*.log -whitespace

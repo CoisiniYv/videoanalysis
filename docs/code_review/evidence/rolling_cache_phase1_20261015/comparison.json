@@ -1,0 +1,75 @@
+{
+  "status": "HARNESS_GATE_PASSED",
+  "authorized_repair_round": 1,
+  "authorization": "User authorized stage-1 harness/preflight repairs up to three repair rounds and requires the exact failure set to be a subset of baseline 98d388c before review.",
+  "current_harness_returncode": 1,
+  "generated_at_kst": "2026-10-15 22:52:40+09:00",
+  "baseline_counts": {
+    "tests": 1928,
+    "failures": 15,
+    "errors": 1,
+    "skipped": 73,
+    "passed": 1839
+  },
+  "current_counts": {
+    "tests": 2101,
+    "failures": 11,
+    "errors": 1,
+    "skipped": 73,
+    "passed": 2016
+  },
+  "added_test_cases": 173,
+  "new_tests_selection": "Exact (classname, name) set difference between current-junit.xml and baseline-junit.xml, run as pytest nodeids with DATABASE_URL and VIDEO_ANALYTICS_DATABASE_URL removed.",
+  "new_tests_counts": {
+    "tests": 173,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 173
+  },
+  "new_tests_returncode": 0,
+  "added_failures_or_errors": [],
+  "removed_failures_or_errors": [
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compose:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_daily_config:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_restarts_only_originally_running_services:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_start_rolling_cache_sinks_fails_when_dual_raw_fanout_missing:failure"
+  ],
+  "comparison_passed": true,
+  "source_sha256": {
+    "harness/tests/test_media_worker_completion_wake.py": "312f21c7202c811966d67b347458ad14cfec0c00901a0562a37fe039cae6d788",
+    "harness/tests/test_midterm_pressure60_baseline_pollution.py": "facbcdbd20e23b2bfd2cfd91a154a76dfd00cc45015f030caf89ee4f2a3cfd41",
+    "harness/tests/test_midterm_pressure60_behavior_rules.py": "9f77e12fcf36f262e607c952fb8211178f4b03ec293f0f7ea34587509974fff8",
+    "harness/tests/test_midterm_pressure60_compose_guard.py": "f9ba318515073ec5f4c3a04a17540262be5ea6a53738fcfac9147b053416e173",
+    "harness/tests/test_midterm_pressure60_media_worker_contract.py": "5b37dbd289bd311885271e9aecb54fe6b67992ce0a8c6dda7dc99a5d7d06fc16",
+    "harness/tests/test_midterm_pressure60_preflight_cli.py": "4c2f03b415f6690cbfd153df76b196275a7eed6dfd094fda7f2303c98e614dd8",
+    "harness/tests/test_midterm_pressure60_preflight_flow.py": "1ee99ebaf0c90406e0d6601cc1213c495267f4b82f002db56776e48cd1cc6f95",
+    "harness/tests/test_midterm_pressure60_publication_rates.py": "3d7cfd50ae22f885fbdbf24bd646dec604aa4d23cba3e0be8edb45f2318d88c5",
+    "harness/tests/test_midterm_pressure60_queue_statistics.py": "4dae3a167323405098138d33832fe7a3a9a27a3b81c2eb821d3463f8d5354379",
+    "harness/tests/test_midterm_pressure60_runtime_readback.py": "8c4ba1cedc7fe3debb4e8f7cd9a889a9a4f1cefbcaa72fdf01e25ee92b3b4027",
+    "harness/tests/test_midterm_pressure60_script.py": "2efb1e8b118fa6534dd7e1ae4d843b52ea46826b6c2cee330c4d6399b7077f2e",
+    "harness/tests/test_midterm_pressure60_storage_guard.py": "f79b88a144a979a47eedcd12477c44d4452079a48daa37bc6e655d9448016e73",
+    "harness/tests/test_midterm_pressure60_storage_preflight.py": "13f0412b451bcad1a148e215a0f0b665f6b8406a94d904814b752f36311a7a3d",
+    "scripts/runtime/pressure_baseline_guard.py": "a2161310f0454e0e6fab81506b77a9a46e316f0c7d7773ef61046e5ee123968a",
+    "scripts/runtime/pressure_runtime_readback.py": "d4669ca4a90bfc69519144c823e97a135c95dae535c7a83a41b675922c5cec52",
+    "scripts/runtime/pressure_storage_guard.py": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27",
+    "scripts/runtime/rolling_cache_storage_preflight.py": "103e9a13a629f743e306467827d8be86b8fdfc5014c832145c084a9d9fa85f32",
+    "scripts/runtime/run_midterm_pressure60.py": "1bfd98d78e7bec7e6e1d2430d4f886fb0c9e3df85fb23508efb74b2821630de5"
+  },
+  "exact_base_config": {
+    "command": "docker compose -f infra/docker-compose.midterm.yml config",
+    "returncode": 0,
+    "started_at_kst_lower_bound": "2026-10-15T21:06:06+09:00",
+    "stdout_sha256": "095e6fa36b1bae186b76d1fdfa39832f13bcdd983c2d966d38a27882652c054a",
+    "note": "Run through the same readonly SSH wrapper. Full rendering is retained outside Git; it is not a service operation."
+  },
+  "notes": [
+    "Source hashes identify the exact tested tree; current-summary code_sha is a precommit label.",
+    "Raw suite timestamps retain the local UTC+08 offset; displayed audit times use KST.",
+    "Minimum-results source hash predates only subsequent runner fixes; its compose/config/doctor inputs are unchanged.",
+    "The previous 17-failure result and six new failures are preserved under history/harness-before-authorized-repair/.",
+    "The two new-test-pollution JSON files in this directory are historical failing fixtures from that prior result, not artifacts of the current passing run.",
+    "All current failures and the collection error are present in baseline 98d388c; no additional failure identity remains.",
+    "The new testcase difference is stored in new-tests-nodeids.json and was separately run after the full suite."
+  ]
+}

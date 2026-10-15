@@ -1,0 +1,6 @@
+{
+  "raw_source": "/tmp/pressure60-readonly-validation-r2.json",
+  "raw_sha256": "881b3078b0e74753c4a815384dc7c2d8409483b6a3e8b6c29401768ab8beda01",
+  "redaction": "Only credential-shaped keys and URI userinfo are redacted; stdout/stderr are unchanged.",
+  "remote_root": "/tmp/pressure60-phase1-preflight-20261015-r2"
+}

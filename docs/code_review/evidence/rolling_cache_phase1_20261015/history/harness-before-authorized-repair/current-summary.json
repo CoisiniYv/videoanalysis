@@ -1,0 +1,111 @@
+{
+  "counts": {
+    "tests": 2092,
+    "failures": 17,
+    "errors": 1,
+    "skipped": 73,
+    "passed": 2001
+  },
+  "failures_and_errors": [
+    {
+      "nodeid": "harness/tests/test_trajectory_thumbnail_cache.py",
+      "kind": "error",
+      "message": "collection failure"
+    },
+    {
+      "nodeid": "harness/tests/test_camera_repository_rows.py::test_get_zone_names_raises_keyerror_only_when_column_missing",
+      "kind": "failure",
+      "message": "Failed: DID NOT RAISE KeyError"
+    },
+    {
+      "nodeid": "harness/tests/test_clip_media_legacy_behavior_baseline.py::test_required_characterization_scenarios_are_named_and_executable",
+      "kind": "failure",
+      "message": "AssertionError: {'name': 'late_annotation', 'nodeid': 'harness/tests/test_media_worker_perf_safety.py::test_late_annotation_retry_uses_unbounded_stream_id_lookback', 'outcome': 'annotation_retry'}"
+    },
+    {
+      "nodeid": "harness/tests/test_compare_adaface_roi_transport.py::test_load_gallery_normalizes_vectors_and_preserves_identity",
+      "kind": "failure",
+      "message": "ModuleNotFoundError: No module named 'app.offline_face_embedder'"
+    },
+    {
+      "nodeid": "harness/tests/test_media_worker_completion_wake.py::test_pressure_completion_wake_is_verified_and_restored[false-true]",
+      "kind": "failure",
+      "message": "AttributeError: 'types.SimpleNamespace' object has no attribute 'dual_shard_same_gpu'"
+    },
+    {
+      "nodeid": "harness/tests/test_media_worker_completion_wake.py::test_pressure_completion_wake_is_verified_and_restored[true-false]",
+      "kind": "failure",
+      "message": "AttributeError: 'types.SimpleNamespace' object has no attribute 'dual_shard_same_gpu'"
+    },
+    {
+      "nodeid": "harness/tests/test_media_worker_completion_wake.py::test_pressure_completion_wake_rejects_an_unapplied_override[true]",
+      "kind": "failure",
+      "message": "AttributeError: 'types.SimpleNamespace' object has no attribute 'dual_shard_same_gpu'"
+    },
+    {
+      "nodeid": "harness/tests/test_media_worker_completion_wake.py::test_pressure_completion_wake_rejects_an_unapplied_override[false]",
+      "kind": "failure",
+      "message": "AttributeError: 'types.SimpleNamespace' object has no attribute 'dual_shard_same_gpu'"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_midterm_deployment_files_exist",
+      "kind": "failure",
+      "message": "AssertionError: assert False"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_runtime_doctor_is_midterm_named",
+      "kind": "failure",
+      "message": "AssertionError: assert ['capture_dep...file.sh', ...] == ['doctor_midt...trix.sh', ...]"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_midterm_source_id_and_camera_config_are_neutral",
+      "kind": "failure",
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/generated/sources.generated.yml'"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_docs_point_to_midterm_deployment_entrypoint",
+      "kind": "failure",
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/CLAUDE.md'"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_pressure60_baseline_pollution.py::test_collector_reads_mode_sinks_and_all_four_pollution_checks[False]",
+      "kind": "failure",
+      "message": "AssertionError: assert {'enabled_pre...unt_mismatch'} == {'enabled_pre...unt_mismatch'}"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_pressure60_baseline_pollution.py::test_collector_reads_mode_sinks_and_all_four_pollution_checks[True]",
+      "kind": "failure",
+      "message": "AssertionError: assert {'enabled_pre...unt_mismatch'} == {'enabled_pre...unt_mismatch'}"
+    },
+    {
+      "nodeid": "harness/tests/test_midterm_pressure60_script.py::test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata",
+      "kind": "failure",
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: 'docker'"
+    },
+    {
+      "nodeid": "harness/tests/test_phase2_operating_point_appendix.py::test_update_appendix_text_replaces_existing_block",
+      "kind": "failure",
+      "message": "AssertionError: assert 'old' not in '# Spec\\n\\n#....json\\n```\\n'"
+    },
+    {
+      "nodeid": "harness/tests/test_runtime_control_service.py::test_stop_dual_runtime_only_stops_dual_extension_containers",
+      "kind": "failure",
+      "message": "psycopg.OperationalError: failed to resolve host 'postgres': [Errno 8] nodename nor servname provided, or not known"
+    },
+    {
+      "nodeid": "harness/tests/test_runtime_control_service.py::test_restart_single_runtime_blocks_when_evidence_active",
+      "kind": "failure",
+      "message": "AssertionError: assert 503 == 409"
+    }
+  ],
+  "interpreter": "/tmp/pressure60-harness-env/bin/python",
+  "dependency_lock": "/tmp/pressure60-harness-lock.txt",
+  "code_sha": "working-tree-before-stage1-commit",
+  "junit": "/tmp/pressure60-final.xml",
+  "cwd": "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject",
+  "command": "env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL /tmp/pressure60-harness-env/bin/python -m pytest -q harness/tests --continue-on-collection-errors --junitxml=/tmp/pressure60-final.xml",
+  "generated_at_kst": "2026-10-15T22:33:23.466413+09:00",
+  "raw_suite_timestamps": [
+    "2026-10-15T21:32:12.348678+08:00"
+  ]
+}

@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py", line 119, in pressure_storage_preflight
+    sources = parse_compose_cache_sources(rendered, sink_services)
+  File "/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_guard.py", line 40, in parse_compose_cache_sources
+    raise StoragePreflightError(f"missing compose service: {service}")
+pressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "scripts/runtime/run_midterm_pressure60.py", line 16488, in <module>
+    raise SystemExit(main())
+  File "scripts/runtime/run_midterm_pressure60.py", line 1761, in main
+    storage_report, rendered_pressure_config = perform_storage_preflight(cfg)
+  File "scripts/runtime/run_midterm_pressure60.py", line 1289, in perform_storage_preflight
+    pressure_override_files=overrides,
+  File "/tmp/pressure60-phase1-preflight-20261015/scripts/runtime/pressure_storage_preflight.py", line 178, in pressure_storage_preflight
+    raise StoragePreflightError(str(exc), report) from exc
+pressure_storage_guard.StoragePreflightError: missing compose service: rolling-cache-sink-a

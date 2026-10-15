@@ -1,0 +1,43 @@
+{
+  "implementation_edits_after_preflight_failure": [],
+  "owned_implementation_files_created_before_preflight": [
+    {
+      "path": "scripts/runtime/pressure_storage_guard.py",
+      "change": "new file, entire contents",
+      "lines": 297,
+      "sha256": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27"
+    },
+    {
+      "path": "scripts/runtime/pressure_storage_preflight.py",
+      "change": "new file, entire contents",
+      "lines": 191,
+      "sha256": "69f44478839a60c5fefd84ec474dde58f636b19915e54f53e4de428d029f1276"
+    },
+    {
+      "path": "scripts/runtime/pressure_runtime_readback.py",
+      "change": "new file, entire contents",
+      "lines": 179,
+      "sha256": "d4669ca4a90bfc69519144c823e97a135c95dae535c7a83a41b675922c5cec52"
+    },
+    {
+      "path": "harness/tests/test_midterm_pressure60_storage_guard.py",
+      "change": "new file, entire contents",
+      "lines": 372,
+      "sha256": "f79b88a144a979a47eedcd12477c44d4452079a48daa37bc6e655d9448016e73"
+    },
+    {
+      "path": "harness/tests/test_midterm_pressure60_storage_preflight.py",
+      "change": "new file, entire contents",
+      "lines": 272,
+      "sha256": "222e3c56f5a6e1d28560003af6bbac9af6fbc0ca92474e03d3b5f23628a2fb7b"
+    },
+    {
+      "path": "harness/tests/test_midterm_pressure60_runtime_readback.py",
+      "change": "new file, entire contents",
+      "lines": 179,
+      "sha256": "8c4ba1cedc7fe3debb4e8f7cd9a889a9a4f1cefbcaa72fdf01e25ee92b3b4027"
+    }
+  ],
+  "main_script_ownership": "Parent agent; this subagent made no edits to run_midterm_pressure60.py.",
+  "evidence_export": "This local exporter creates audit artifacts only; no implementation fix or test was performed."
+}

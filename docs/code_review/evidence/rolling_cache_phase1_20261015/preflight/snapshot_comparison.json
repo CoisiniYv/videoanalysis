@@ -1,0 +1,24 @@
+{
+  "source": "/tmp/pressure60-remote-cli-first.json",
+  "source_sha256": "9d5470d5aa2a9619d43cee78800df5d7037faccd0d78e3c196887ee2bd1ad793",
+  "method": "Sort existing snapshots Mounts by Destination, Source, Type; compare all captured fields.",
+  "container_count_before": 30,
+  "container_count_after": 30,
+  "original_raw_order_equal": false,
+  "mount_order_changed_count": 10,
+  "mount_order_changed_containers": [
+    "/video-analytics-midterm-adaface-roi-worker",
+    "/video-analytics-midterm-api",
+    "/video-analytics-midterm-clip-worker",
+    "/video-analytics-midterm-evidence-viewer",
+    "/video-analytics-midterm-media-worker",
+    "/video-analytics-midterm-replay-b",
+    "/video-analytics-midterm-replay-service",
+    "/video-analytics-midterm-rolling-cache-sink-a",
+    "/video-analytics-midterm-savant-a",
+    "/video-analytics-midterm-savant-b"
+  ],
+  "normalized_equal": true,
+  "differences_after_normalization": [],
+  "scope": "Only existing local JSON was processed. No fresh remote inspection."
+}

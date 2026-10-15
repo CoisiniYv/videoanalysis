@@ -1,0 +1,939 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+.....................................................................F.. [ 10%]
+...................................................................F.... [ 13%]
+....................s...............................................F... [ 17%]
+.................................................................sss.... [ 20%]
+................ssss.................................................... [ 24%]
+...............sss..sssss............................................... [ 27%]
+........................................................................ [ 30%]
+........................................................................ [ 34%]
+........................................................................ [ 37%]
+.........................................ssssssss....................... [ 41%]
+........................................................................ [ 44%]
+.......................................................sssssssssssssssss [ 48%]
+s..........................ssssssss...........sssssss................... [ 51%]
+.................................s...................................... [ 54%]
+...........................................ssss......................... [ 58%]
+....................................................F.....F........F.... [ 61%]
+........F............................................................... [ 65%]
+........................................................................ [ 68%]
+........................................................................ [ 72%]
+..........................F............................................. [ 75%]
+........................................................................ [ 78%]
+........................................................................ [ 82%]
+..................................................................F..... [ 85%]
+........................................................................ [ 89%]
+.......................................................................F [ 92%]
+F....................................................................... [ 96%]
+................................................................ssssssss [ 99%]
+sss.........                                                             [100%]
+==================================== ERRORS ====================================
+______ ERROR collecting harness/tests/test_trajectory_thumbnail_cache.py _______
+ImportError while importing test module '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/harness/tests/test_trajectory_thumbnail_cache.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+harness/tests/test_trajectory_thumbnail_cache.py:14: in <module>
+    from app.main import MediaStaticFiles  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ModuleNotFoundError: No module named 'app.main'
+=================================== FAILURES ===================================
+_________ test_get_zone_names_raises_keyerror_only_when_column_missing _________
+
+    def test_get_zone_names_raises_keyerror_only_when_column_missing():
+        """A row that genuinely lacks 'zone_name' is a schema bug, not a
+        repository bug — assert we still surface it as a KeyError so callers
+        don't silently swallow it.
+        """
+        conn = _FakeConnection(rows=[{"wrong_column": "perimeter"}])
+        repo = CameraRepository(conn)
+>       with pytest.raises(KeyError):
+             ^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE KeyError
+
+harness/tests/test_camera_repository_rows.py:143: Failed
+______ test_required_characterization_scenarios_are_named_and_executable _______
+
+    def test_required_characterization_scenarios_are_named_and_executable() -> None:
+        manifest = _json("legacy_behavior_manifest.json")
+        scenarios = manifest["clip_scenarios"] + manifest["media_scenarios"]
+    
+        assert manifest["acceptance_token"] == (
+            "PASS_CLIP_MEDIA_LEGACY_BEHAVIOR_BASELINE_FROZEN"
+        )
+        for scenario in scenarios:
+            relative, test_name = scenario["nodeid"].split("::", 1)
+>           assert test_name in _test_names(ROOT / relative), scenario
+E           AssertionError: {'name': 'late_annotation', 'nodeid': 'harness/tests/test_media_worker_perf_safety.py::test_late_annotation_retry_uses_unbounded_stream_id_lookback', 'outcome': 'annotation_retry'}
+E           assert 'test_late_annotation_retry_uses_unbounded_stream_id_lookback' in {'test_active_epoch_scan_uses_incremental_children_and_ignores_old_epoch', 'test_db_index_failure_persists_in_memory_a...dex_io_gate_serializes_expanded_row_writes_and_reports_wait', 'test_finalizer_log_formats_extended_remux_metrics', ...}
+E            +  where {'test_active_epoch_scan_uses_incremental_children_and_ignores_old_epoch', 'test_db_index_failure_persists_in_memory_a...dex_io_gate_serializes_expanded_row_writes_and_reports_wait', 'test_finalizer_log_formats_extended_remux_metrics', ...} = _test_names((PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject') / 'harness/tests/test_media_worker_perf_safety.py'))
+
+harness/tests/test_clip_media_legacy_behavior_baseline.py:90: AssertionError
+_________ test_load_gallery_normalizes_vectors_and_preserves_identity __________
+
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_load_gallery_normalizes_v0')
+
+    def test_load_gallery_normalizes_vectors_and_preserves_identity(tmp_path: Path) -> None:
+        vector = [0.0] * 512
+        vector[17] = 2.0
+        gallery_file = tmp_path / "gallery.psv"
+        gallery_file.write_text(
+            f"7|3|Reese|{vector!r}\n",
+            encoding="utf-8",
+        )
+    
+>       rows, embeddings = _module().load_gallery(gallery_file)
+                           ^^^^^^^^^
+
+harness/tests/test_compare_adaface_roi_transport.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+harness/tests/test_compare_adaface_roi_transport.py:21: in _module
+    spec.loader.exec_module(module)
+<frozen importlib._bootstrap_external>:999: in exec_module
+    ???
+<frozen importlib._bootstrap>:488: in _call_with_frames_removed
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    #!/usr/bin/env python3
+    """Compare inline-aligned and JPEG-transport AdaFace embeddings offline."""
+    
+    from __future__ import annotations
+    
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+    
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+    
+    
+    ROOT = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(ROOT / "services/face-worker"))
+    
+>   from app.offline_face_embedder import (  # noqa: E402
+        _decode_yolov8_output,
+        _nms,
+        _preprocess_adaface,
+        _preprocess_yolov8,
+    )
+E   ModuleNotFoundError: No module named 'app.offline_face_embedder'
+
+scripts/tools/compare_adaface_roi_transport.py:19: ModuleNotFoundError
+_____________________ test_midterm_deployment_files_exist ______________________
+
+    def test_midterm_deployment_files_exist() -> None:
+        assert COMPOSE.exists()
+        assert ENV_FILE.exists()
+        assert MIDTERM_START.exists()
+        assert MIDTERM_STOP.exists()
+        assert MIDTERM_HEALTH.exists()
+        assert MIDTERM_PACKAGE_CLEAN.exists()
+        assert MIDTERM_DEPLOY_CLEAN.exists()
+        assert CLEAN_MIGRATION_DOC.exists()
+        assert API_FACE_RUNTIME_DOCKERFILE.exists()
+        assert API_FACE_RUNTIME_REQUIREMENTS.exists()
+        assert REPLAY_CONFIG.exists()
+        assert REPLAY_A_CONFIG.exists()
+        assert REPLAY_B_CONFIG.exists()
+        assert CAMERA_CONFIG.exists()
+        assert SAVANT_MODULE.exists()
+        assert VIDEO_FILE_SINK_ENTRYPOINT.exists()
+        for doc in DOCS:
+>           assert doc.exists()
+E           AssertionError: assert False
+E            +  where False = exists()
+E            +    where exists = PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/CLAUDE.md').exists
+
+harness/tests/test_midterm_deployment_contract.py:117: AssertionError
+_____________________ test_runtime_doctor_is_midterm_named _____________________
+
+    def test_runtime_doctor_is_midterm_named() -> None:
+        runtime_scripts = sorted(path.name for path in (ROOT / "scripts" / "runtime").glob("*.sh"))
+>       assert runtime_scripts == [
+            "doctor_midterm.sh",
+            "precreate_operator_dual_runtime.sh",
+            "prepare_dual_4090_savant_b_model_cache.sh",
+            "rolling_cache_sink_entrypoint.sh",
+            "run_pressure60_dual1gpu_profile.sh",
+            "run_pressure60_t4_analysis_matrix.sh",
+            "video_file_sink_entrypoint.sh",
+        ]
+E       AssertionError: assert ['capture_dep...file.sh', ...] == ['doctor_midt...trix.sh', ...]
+E         
+E         At index 0 diff: 'capture_deployment_baseline.sh' != 'doctor_midterm.sh'
+E         Left contains 2 more items, first extra item: 'set_operator_credentials.sh'
+E         Use -v to get more diff
+
+harness/tests/test_midterm_deployment_contract.py:259: AssertionError
+_____________ test_midterm_source_id_and_camera_config_are_neutral _____________
+
+    def test_midterm_source_id_and_camera_config_are_neutral() -> None:
+        compose = _compose()
+        camera_config = yaml.safe_load(_text(CAMERA_CONFIG))
+        configured_cameras = list(camera_config["cameras"].values())
+    
+        assert "SOURCE_ID" not in compose["services"]["savant-security"]["environment"]
+        max_parallel_streams = compose["services"]["savant-security"]["environment"][
+            "MAX_PARALLEL_STREAMS"
+        ]
+        assert max_parallel_streams == "${MAX_PARALLEL_STREAMS:-64}"
+        assert compose["services"]["savant-security"]["environment"]["BATCH_SIZE"] == (
+            "${BATCH_SIZE:-4}"
+        )
+        assert _compose_env_default_int(max_parallel_streams, "MAX_PARALLEL_STREAMS") >= max(
+            2,
+>           _enabled_rtsp_source_count() * 2,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        )
+
+harness/tests/test_midterm_deployment_contract.py:664: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+harness/tests/test_midterm_deployment_contract.py:82: in _enabled_rtsp_source_count
+    sources = _sources_config()["sources"]
+              ^^^^^^^^^^^^^^^^^
+harness/tests/test_midterm_deployment_contract.py:78: in _sources_config
+    return yaml.safe_load(_text(SOURCES_CONFIG))
+                          ^^^^^^^^^^^^^^^^^^^^^
+harness/tests/test_midterm_deployment_contract.py:47: in _text
+    return path.read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/generated/sources.generated.yml')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/infra/generated/sources.generated.yml'
+
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/pathlib.py:1013: FileNotFoundError
+_______________ test_docs_point_to_midterm_deployment_entrypoint _______________
+
+    def test_docs_point_to_midterm_deployment_entrypoint() -> None:
+        for doc in DOCS:
+>           text = _text(doc)
+                   ^^^^^^^^^^
+
+harness/tests/test_midterm_deployment_contract.py:1261: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+harness/tests/test_midterm_deployment_contract.py:47: in _text
+    return path.read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/CLAUDE.md')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/CLAUDE.md'
+
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/pathlib.py:1013: FileNotFoundError
+___ test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata ____
+
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_rolling_cache_cleanup_rem0')
+
+    def test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata(
+        tmp_path: Path,
+    ) -> None:
+        module = _load_module()
+        cfg = _config(module, run_id="rolling_canary")
+        materialized_root = tmp_path / "rolling-cache-materialized"
+        event_dir = (
+            materialized_root
+            / "midterm"
+            / "epochs"
+            / "epoch-a"
+            / "materialized"
+            / "11111111-1111-4111-8111-111111111111"
+        )
+        event_dir.mkdir(parents=True)
+        (event_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "event_id": "11111111-1111-4111-8111-111111111111",
+                    "source_id": "rolling_canary_00",
+                    "labels": {"source_id": "rolling_canary_00"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (event_dir / "video.mov").write_bytes(b"video")
+    
+        class _Rows:
+            def fetchall(self):
+                return []
+    
+        class _Conn:
+            def execute(self, *_args, **_kwargs):
+                return _Rows()
+    
+>       cleanup = module.remove_pressure_rolling_cache_artifacts(
+            _Conn(),
+            cfg,
+            event_ids=[],
+            materialized_root=materialized_root,
+        )
+
+harness/tests/test_midterm_pressure60_script.py:3109: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+scripts/runtime/run_midterm_pressure60.py:13283: in remove_pressure_rolling_cache_artifacts
+    root = pressure_rolling_cache_root_host(cfg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+scripts/runtime/run_midterm_pressure60.py:12870: in pressure_rolling_cache_root_host
+    resolved = resolve_container_bind_source(
+scripts/runtime/run_midterm_pressure60.py:13053: in resolve_container_bind_source
+    completed = subprocess.run(
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py:548: in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py:1026: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: 255 args: ['docker', 'inspect', 'video-analytics-midterm...>
+args = ['docker', 'inspect', 'video-analytics-midterm-rolling-cache-sink', '--format', '{{json .Mounts}}']
+executable = b'docker', preexec_fn = None, close_fds = True, pass_fds = ()
+cwd = None, env = None, startupinfo = None, creationflags = 0, shell = False
+p2cread = -1, p2cwrite = -1, c2pread = 15, c2pwrite = 25, errread = -1
+errwrite = 27, restore_signals = True, gid = None, gids = None, uid = None
+umask = -1, start_new_session = False, process_group = -1
+
+    def _execute_child(self, args, executable, preexec_fn, close_fds,
+                       pass_fds, cwd, env,
+                       startupinfo, creationflags, shell,
+                       p2cread, p2cwrite,
+                       c2pread, c2pwrite,
+                       errread, errwrite,
+                       restore_signals,
+                       gid, gids, uid, umask,
+                       start_new_session, process_group):
+        """Execute program (POSIX version)"""
+    
+        if isinstance(args, (str, bytes)):
+            args = [args]
+        elif isinstance(args, os.PathLike):
+            if shell:
+                raise TypeError('path-like args is not allowed when '
+                                'shell is true')
+            args = [args]
+        else:
+            args = list(args)
+    
+        if shell:
+            # On Android the default shell is at '/system/bin/sh'.
+            unix_shell = ('/system/bin/sh' if
+                      hasattr(sys, 'getandroidapilevel') else '/bin/sh')
+            args = [unix_shell, "-c"] + args
+            if executable:
+                args[0] = executable
+    
+        if executable is None:
+            executable = args[0]
+    
+        sys.audit("subprocess.Popen", executable, args, cwd, env)
+    
+        if (_USE_POSIX_SPAWN
+                and os.path.dirname(executable)
+                and preexec_fn is None
+                and not close_fds
+                and not pass_fds
+                and cwd is None
+                and (p2cread == -1 or p2cread > 2)
+                and (c2pwrite == -1 or c2pwrite > 2)
+                and (errwrite == -1 or errwrite > 2)
+                and not start_new_session
+                and process_group == -1
+                and gid is None
+                and gids is None
+                and uid is None
+                and umask < 0):
+            self._posix_spawn(args, executable, env, restore_signals,
+                              p2cread, p2cwrite,
+                              c2pread, c2pwrite,
+                              errread, errwrite)
+            return
+    
+        orig_executable = executable
+    
+        # For transferring possible exec failure from child to parent.
+        # Data format: "exception name:hex errno:description"
+        # Pickle is not used; it is complex and involves memory allocation.
+        errpipe_read, errpipe_write = os.pipe()
+        # errpipe_write must not be in the standard io 0, 1, or 2 fd range.
+        low_fds_to_close = []
+        while errpipe_write < 3:
+            low_fds_to_close.append(errpipe_write)
+            errpipe_write = os.dup(errpipe_write)
+        for low_fd in low_fds_to_close:
+            os.close(low_fd)
+        try:
+            try:
+                # We must avoid complex work that could involve
+                # malloc or free in the child process to avoid
+                # potential deadlocks, thus we do all this here.
+                # and pass it to fork_exec()
+    
+                if env is not None:
+                    env_list = []
+                    for k, v in env.items():
+                        k = os.fsencode(k)
+                        if b'=' in k:
+                            raise ValueError("illegal environment variable name")
+                        env_list.append(k + b'=' + os.fsencode(v))
+                else:
+                    env_list = None  # Use execv instead of execve.
+                executable = os.fsencode(executable)
+                if os.path.dirname(executable):
+                    executable_list = (executable,)
+                else:
+                    # This matches the behavior of os._execvpe().
+                    executable_list = tuple(
+                        os.path.join(os.fsencode(dir), executable)
+                        for dir in os.get_exec_path(env))
+                fds_to_keep = set(pass_fds)
+                fds_to_keep.add(errpipe_write)
+                self.pid = _fork_exec(
+                        args, executable_list,
+                        close_fds, tuple(sorted(map(int, fds_to_keep))),
+                        cwd, env_list,
+                        p2cread, p2cwrite, c2pread, c2pwrite,
+                        errread, errwrite,
+                        errpipe_read, errpipe_write,
+                        restore_signals, start_new_session,
+                        process_group, gid, gids, uid, umask,
+                        preexec_fn, _USE_VFORK)
+                self._child_created = True
+            finally:
+                # be sure the FD is closed no matter what
+                os.close(errpipe_write)
+    
+            self._close_pipe_fds(p2cread, p2cwrite,
+                                 c2pread, c2pwrite,
+                                 errread, errwrite)
+    
+            # Wait for exec to fail or succeed; possibly raising an
+            # exception (limited in size)
+            errpipe_data = bytearray()
+            while True:
+                part = os.read(errpipe_read, 50000)
+                errpipe_data += part
+                if not part or len(errpipe_data) > 50000:
+                    break
+        finally:
+            # be sure the FD is closed no matter what
+            os.close(errpipe_read)
+    
+        if errpipe_data:
+            try:
+                pid, sts = os.waitpid(self.pid, 0)
+                if pid == self.pid:
+                    self._handle_exitstatus(sts)
+                else:
+                    self.returncode = sys.maxsize
+            except ChildProcessError:
+                pass
+    
+            try:
+                exception_name, hex_errno, err_msg = (
+                        errpipe_data.split(b':', 2))
+                # The encoding here should match the encoding
+                # written in by the subprocess implementations
+                # like _posixsubprocess
+                err_msg = err_msg.decode()
+            except ValueError:
+                exception_name = b'SubprocessError'
+                hex_errno = b'0'
+                err_msg = 'Bad exception data from child: {!r}'.format(
+                              bytes(errpipe_data))
+            child_exception_type = getattr(
+                    builtins, exception_name.decode('ascii'),
+                    SubprocessError)
+            if issubclass(child_exception_type, OSError) and hex_errno:
+                errno_num = int(hex_errno, 16)
+                if err_msg == "noexec:chdir":
+                    err_msg = ""
+                    # The error must be from chdir(cwd).
+                    err_filename = cwd
+                elif err_msg == "noexec":
+                    err_msg = ""
+                    err_filename = None
+                else:
+                    err_filename = orig_executable
+                if errno_num != 0:
+                    err_msg = os.strerror(errno_num)
+                if err_filename is not None:
+>                   raise child_exception_type(errno_num, err_msg, err_filename)
+E                   FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+
+../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py:1955: FileNotFoundError
+______________ test_update_appendix_text_replaces_existing_block _______________
+
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_update_appendix_text_repl0')
+
+    def test_update_appendix_text_replaces_existing_block(tmp_path: Path) -> None:
+        spec_text = """# Spec
+    
+    ## Appendix A — Measured Operating Point (fill in Phase 2/3)
+    
+    ```text
+    T4 model / driver / CUDA:
+    old
+    ```
+    """
+        appendix = phase2_appendix.render_appendix(
+            _passing_report(),
+            report_path=tmp_path / "phase2.json",
+        )
+        updated = phase2_appendix.update_appendix_text(spec_text, appendix)
+    
+        assert "NVIDIA T4" in updated
+        assert "observed_avg_mean=8.050" in updated
+        assert "evidence_count_delta=3" in updated
+>       assert "old" not in updated
+E       AssertionError: assert 'old' not in '# Spec\n\n#....json\n```\n'
+E         
+E         'old' is contained here:
+E           vate/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_update_appendix_text_repl0/phase2.json
+E         ?           +++
+E           ```
+
+harness/tests/test_phase2_operating_point_appendix.py:82: AssertionError
+_________ test_stop_dual_runtime_only_stops_dual_extension_containers __________
+
+    def test_stop_dual_runtime_only_stops_dual_extension_containers() -> None:
+        fake = FakeDockerClient()
+    
+>       result = stop_dual_runtime(config=_config(), docker_client=fake)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+harness/tests/test_runtime_control_service.py:134: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+services/api/app/services/runtime_control.py:196: in stop_dual_runtime
+    disabled_camera_count = _disable_all_cameras()
+                            ^^^^^^^^^^^^^^^^^^^^^^
+services/api/app/services/runtime_control.py:214: in _disable_all_cameras
+    conn = psycopg.connect(get_settings().database_url)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/tmp/pressure60-harness-env/lib/python3.12/site-packages/psycopg/connection.py:100: in connect
+    attempts = conninfo_attempts(params)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+params = {'user': 'video', 'password': 'video', 'dbname': 'video_analytics', 'host': 'postgres', ...}
+
+    def conninfo_attempts(params: ConnMapping) -> list[ConnDict]:
+        """Split a set of connection params on the single attempts to perform.
+    
+        A connection param can perform more than one attempt more than one ``host``
+        is provided.
+    
+        Also perform async resolution of the hostname into hostaddr. Because a host
+        can resolve to more than one address, this can lead to yield more attempts
+        too. Raise `OperationalError` if no host could be resolved.
+    
+        Because the libpq async function doesn't honour the timeout, we need to
+        reimplement the repeated attempts.
+        """
+        last_exc = None
+        attempts = []
+        if prefer_standby := (
+            get_param(params, "target_session_attrs") == "prefer-standby"
+        ):
+            params = {k: v for k, v in params.items() if k != "target_session_attrs"}
+    
+        for attempt in split_attempts(params):
+            try:
+                attempts.extend(_resolve_hostnames(attempt))
+            except OSError as ex:
+                last_exc = e.OperationalError(
+                    f"failed to resolve host {attempt.get('host')!r}: {ex}"
+                )
+                logger.debug("%s", last_exc)
+    
+        if not attempts:
+            assert last_exc
+            # We couldn't resolve anything
+>           raise last_exc
+E           psycopg.OperationalError: failed to resolve host 'postgres': [Errno 8] nodename nor servname provided, or not known
+
+/tmp/pressure60-harness-env/lib/python3.12/site-packages/psycopg/_conninfo_attempts.py:55: OperationalError
+___________ test_restart_single_runtime_blocks_when_evidence_active ____________
+
+action = 'single_restart', force = False, limit = 12
+
+    def check_runtime_restart_evidence_guard(
+        *,
+        action: str,
+        force: bool = False,
+        limit: int = DEFAULT_EVIDENCE_GUARD_LIMIT,
+    ) -> dict[str, Any]:
+        """Block runtime epoch switches until non-terminal evidence tasks settle."""
+    
+        blocking_states = list(
+            sorted(
+                set(RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES)
+                | set(RUNTIME_EPOCH_BARRIER_TASK_STATES)
+                | set(RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES)
+            )
+        )
+        timeout_s = max(
+            0.0,
+            _env_float(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_TIMEOUT_S",
+                DEFAULT_EPOCH_BARRIER_TIMEOUT_S,
+            ),
+        )
+        poll_interval_s = max(
+            0.05,
+            _env_float(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_POLL_INTERVAL_S",
+                DEFAULT_EPOCH_BARRIER_POLL_INTERVAL_S,
+            ),
+        )
+        force_recheck_attempts = max(
+            1,
+            _env_int(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS",
+                DEFAULT_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS,
+            ),
+        )
+        current_runtime_epoch_id = _current_runtime_epoch_id()
+        guard: dict[str, Any] = {
+            "ok": True,
+            "blocked": False,
+            "forced": False,
+            "action": action,
+            "active_count": 0,
+            "stale_count": 0,
+            "blocking_states": blocking_states,
+            "current_runtime_epoch_id": current_runtime_epoch_id,
+            "barrier_timeout_s": timeout_s,
+            "barrier_poll_interval_s": poll_interval_s,
+            "force_terminal_reason": RUNTIME_EPOCH_BARRIER_FORCE_REASON,
+            "blocking_task_statuses": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+            "blocking_materialization_statuses": list(
+                RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+            ),
+            "tasks": [],
+            "stale_tasks": [],
+            "source_breakdown": [],
+            "epoch_breakdown": [],
+            "current_epoch_count": 0,
+            "foreign_epoch_count": 0,
+            "missing_epoch_count": 0,
+            "unknown_current_epoch_count": 0,
+        }
+        if not _env_bool("CAMERA_RUNTIME_EVIDENCE_GUARD_ENABLED", default=True):
+            return {
+                **guard,
+                "skipped": True,
+                "skip_reason": "camera_runtime_evidence_guard_disabled",
+            }
+    
+        started = time.monotonic()
+        last_snapshot: dict[str, Any] | None = None
+        try:
+            while True:
+>               last_snapshot = _runtime_epoch_barrier_snapshot(
+                    limit=limit,
+                    current_runtime_epoch_id=current_runtime_epoch_id,
+                )
+
+services/api/app/services/runtime_apply.py:456: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+services/api/app/services/runtime_apply.py:1025: in _runtime_epoch_barrier_snapshot
+    with psycopg.connect(
+/tmp/pressure60-harness-env/lib/python3.12/site-packages/psycopg/connection.py:100: in connect
+    attempts = conninfo_attempts(params)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+params = {'user': 'video', 'password': 'video', 'dbname': 'video_analytics', 'host': 'postgres', ...}
+
+    def conninfo_attempts(params: ConnMapping) -> list[ConnDict]:
+        """Split a set of connection params on the single attempts to perform.
+    
+        A connection param can perform more than one attempt more than one ``host``
+        is provided.
+    
+        Also perform async resolution of the hostname into hostaddr. Because a host
+        can resolve to more than one address, this can lead to yield more attempts
+        too. Raise `OperationalError` if no host could be resolved.
+    
+        Because the libpq async function doesn't honour the timeout, we need to
+        reimplement the repeated attempts.
+        """
+        last_exc = None
+        attempts = []
+        if prefer_standby := (
+            get_param(params, "target_session_attrs") == "prefer-standby"
+        ):
+            params = {k: v for k, v in params.items() if k != "target_session_attrs"}
+    
+        for attempt in split_attempts(params):
+            try:
+                attempts.extend(_resolve_hostnames(attempt))
+            except OSError as ex:
+                last_exc = e.OperationalError(
+                    f"failed to resolve host {attempt.get('host')!r}: {ex}"
+                )
+                logger.debug("%s", last_exc)
+    
+        if not attempts:
+            assert last_exc
+            # We couldn't resolve anything
+>           raise last_exc
+E           psycopg.OperationalError: failed to resolve host 'postgres': [Errno 8] nodename nor servname provided, or not known
+
+/tmp/pressure60-harness-env/lib/python3.12/site-packages/psycopg/_conninfo_attempts.py:55: OperationalError
+
+The above exception was the direct cause of the following exception:
+
+action = 'single_restart', force = False
+
+    def _check_evidence_restart_guard(*, action: str, force: bool) -> dict[str, Any]:
+        try:
+>           return check_runtime_restart_evidence_guard(action=action, force=force)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+services/api/app/services/runtime_control.py:265: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+action = 'single_restart', force = False, limit = 12
+
+    def check_runtime_restart_evidence_guard(
+        *,
+        action: str,
+        force: bool = False,
+        limit: int = DEFAULT_EVIDENCE_GUARD_LIMIT,
+    ) -> dict[str, Any]:
+        """Block runtime epoch switches until non-terminal evidence tasks settle."""
+    
+        blocking_states = list(
+            sorted(
+                set(RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES)
+                | set(RUNTIME_EPOCH_BARRIER_TASK_STATES)
+                | set(RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES)
+            )
+        )
+        timeout_s = max(
+            0.0,
+            _env_float(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_TIMEOUT_S",
+                DEFAULT_EPOCH_BARRIER_TIMEOUT_S,
+            ),
+        )
+        poll_interval_s = max(
+            0.05,
+            _env_float(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_POLL_INTERVAL_S",
+                DEFAULT_EPOCH_BARRIER_POLL_INTERVAL_S,
+            ),
+        )
+        force_recheck_attempts = max(
+            1,
+            _env_int(
+                "CAMERA_RUNTIME_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS",
+                DEFAULT_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS,
+            ),
+        )
+        current_runtime_epoch_id = _current_runtime_epoch_id()
+        guard: dict[str, Any] = {
+            "ok": True,
+            "blocked": False,
+            "forced": False,
+            "action": action,
+            "active_count": 0,
+            "stale_count": 0,
+            "blocking_states": blocking_states,
+            "current_runtime_epoch_id": current_runtime_epoch_id,
+            "barrier_timeout_s": timeout_s,
+            "barrier_poll_interval_s": poll_interval_s,
+            "force_terminal_reason": RUNTIME_EPOCH_BARRIER_FORCE_REASON,
+            "blocking_task_statuses": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+            "blocking_materialization_statuses": list(
+                RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+            ),
+            "tasks": [],
+            "stale_tasks": [],
+            "source_breakdown": [],
+            "epoch_breakdown": [],
+            "current_epoch_count": 0,
+            "foreign_epoch_count": 0,
+            "missing_epoch_count": 0,
+            "unknown_current_epoch_count": 0,
+        }
+        if not _env_bool("CAMERA_RUNTIME_EVIDENCE_GUARD_ENABLED", default=True):
+            return {
+                **guard,
+                "skipped": True,
+                "skip_reason": "camera_runtime_evidence_guard_disabled",
+            }
+    
+        started = time.monotonic()
+        last_snapshot: dict[str, Any] | None = None
+        try:
+            while True:
+                last_snapshot = _runtime_epoch_barrier_snapshot(
+                    limit=limit,
+                    current_runtime_epoch_id=current_runtime_epoch_id,
+                )
+                if int(last_snapshot.get("blocking_count") or 0) <= 0:
+                    return {
+                        **guard,
+                        **last_snapshot,
+                        "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                        "active_count": 0,
+                    }
+                elapsed = time.monotonic() - started
+                if elapsed >= timeout_s:
+                    break
+                time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed)))
+        except Exception as exc:
+            details = {
+                **guard,
+                "ok": False,
+                "blocked": not force,
+                "guard_unavailable": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "force_parameter": "force=true",
+            }
+            if force:
+                return {**details, "ok": True, "blocked": False, "forced": True}
+>           raise RuntimeApplyBlockedError(
+                "runtime evidence guard unavailable; refusing to interrupt evidence workers",
+                details=details,
+                status_code=503,
+            ) from exc
+E           app.services.runtime_apply.RuntimeApplyBlockedError: runtime evidence guard unavailable; refusing to interrupt evidence workers
+
+services/api/app/services/runtime_apply.py:482: RuntimeApplyBlockedError
+
+The above exception was the direct cause of the following exception:
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x130734440>
+
+    def test_restart_single_runtime_blocks_when_evidence_active(monkeypatch) -> None:
+        fake = FakeDockerClient()
+    
+        def fake_guard(**_kwargs):
+            raise RuntimeControlBlockedError(
+                "runtime restart blocked because evidence tasks are still active",
+                details={
+                    "ok": False,
+                    "blocked": True,
+                    "active_count": 1,
+                    "tasks": [{"task_id": "task-1", "blocking_state": "finalizing"}],
+                },
+                status_code=409,
+            )
+    
+        import app.services.runtime_control as runtime_control
+    
+        monkeypatch.setattr(runtime_control, "_check_evidence_restart_guard", fake_guard)
+    
+        try:
+>           restart_single_runtime(config=_config(), docker_client=fake)
+
+harness/tests/test_runtime_control_service.py:166: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+services/api/app/services/runtime_control.py:172: in restart_single_runtime
+    evidence_guard = _check_evidence_restart_guard(action="single_restart", force=force)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+action = 'single_restart', force = False
+
+    def _check_evidence_restart_guard(*, action: str, force: bool) -> dict[str, Any]:
+        try:
+            return check_runtime_restart_evidence_guard(action=action, force=force)
+        except RuntimeApplyBlockedError as exc:
+>           raise RuntimeControlBlockedError(
+                str(exc),
+                details=exc.details,
+                status_code=exc.status_code,
+            ) from exc
+E           app.services.runtime_control.RuntimeControlBlockedError: runtime evidence guard unavailable; refusing to interrupt evidence workers
+
+services/api/app/services/runtime_control.py:267: RuntimeControlBlockedError
+
+During handling of the above exception, another exception occurred:
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x130734440>
+
+    def test_restart_single_runtime_blocks_when_evidence_active(monkeypatch) -> None:
+        fake = FakeDockerClient()
+    
+        def fake_guard(**_kwargs):
+            raise RuntimeControlBlockedError(
+                "runtime restart blocked because evidence tasks are still active",
+                details={
+                    "ok": False,
+                    "blocked": True,
+                    "active_count": 1,
+                    "tasks": [{"task_id": "task-1", "blocking_state": "finalizing"}],
+                },
+                status_code=409,
+            )
+    
+        import app.services.runtime_control as runtime_control
+    
+        monkeypatch.setattr(runtime_control, "_check_evidence_restart_guard", fake_guard)
+    
+        try:
+            restart_single_runtime(config=_config(), docker_client=fake)
+        except RuntimeControlBlockedError as exc:
+>           assert exc.status_code == 409
+E           AssertionError: assert 503 == 409
+E            +  where 503 = RuntimeControlBlockedError('runtime evidence guard unavailable; refusing to interrupt evidence workers').status_code
+
+harness/tests/test_runtime_control_service.py:168: AssertionError
+=============================== warnings summary ===============================
+../../../../../../tmp/pressure60-harness-env/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /tmp/pressure60-harness-env/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED harness/tests/test_camera_repository_rows.py::test_get_zone_names_raises_keyerror_only_when_column_missing
+FAILED harness/tests/test_clip_media_legacy_behavior_baseline.py::test_required_characterization_scenarios_are_named_and_executable
+FAILED harness/tests/test_compare_adaface_roi_transport.py::test_load_gallery_normalizes_vectors_and_preserves_identity
+FAILED harness/tests/test_midterm_deployment_contract.py::test_midterm_deployment_files_exist
+FAILED harness/tests/test_midterm_deployment_contract.py::test_runtime_doctor_is_midterm_named
+FAILED harness/tests/test_midterm_deployment_contract.py::test_midterm_source_id_and_camera_config_are_neutral
+FAILED harness/tests/test_midterm_deployment_contract.py::test_docs_point_to_midterm_deployment_entrypoint
+FAILED harness/tests/test_midterm_pressure60_script.py::test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata
+FAILED harness/tests/test_phase2_operating_point_appendix.py::test_update_appendix_text_replaces_existing_block
+FAILED harness/tests/test_runtime_control_service.py::test_stop_dual_runtime_only_stops_dual_extension_containers
+FAILED harness/tests/test_runtime_control_service.py::test_restart_single_runtime_blocks_when_evidence_active
+ERROR harness/tests/test_trajectory_thumbnail_cache.py
+11 failed, 2016 passed, 73 skipped, 1 warning, 1 error in 22.98s

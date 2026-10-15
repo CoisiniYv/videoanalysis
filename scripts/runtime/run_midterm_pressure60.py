@@ -10,6 +10,7 @@ keeping a bounded set of playable evidence bundles for operator review.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import csv
 import hashlib
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import random
+import shlex
 import shutil
 import signal
 import socket
@@ -47,6 +49,15 @@ from libs.evidence_lifecycle import (
     ACTIVE_COMPATIBILITY_TASK_STATUSES,
     ACTIVE_MATERIALIZATION_STATUSES,
     TERMINAL_MATERIALIZATION_STATUSES,
+)
+from scripts.runtime.pressure_baseline_guard import baseline_pollution
+from scripts.runtime.pressure_storage_guard import (
+    CACHE_TARGETS, StoragePreflightError, parse_compose_cache_sources, validate_cache_sources,
+)
+from scripts.runtime.rolling_cache_storage_preflight import preflight_failure_report
+from scripts.runtime.pressure_runtime_readback import (
+    RuntimeReadbackError, collect_runtime_readback,
+    expected_forwarder_environment, runtime_readback_services,
 )
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
@@ -460,6 +471,7 @@ class PressureConfig:
     rolling_cache_evidence: bool
     rolling_cache_enable_coverage_merge: bool
     cleanup: bool
+    behavior_rules: tuple[str, ...] = ()
     clear_existing_evidence: bool = False
     discard_pressure_results: bool = False
     rolling_cache_prefill_s: int = 0
@@ -514,12 +526,46 @@ class PressureConfig:
     rolling_cache_publication_final_parent_group_limit: int = 1
     rolling_cache_publication_file_sync_mode: str = "fsync"
     rolling_cache_publication_metadata_layout: str = "split"
+    allow_rotational_rolling_cache: bool = False
+    preflight_without_storage_override: bool = False
+
+
+PRESSURE_BEHAVIOR_RULES = ("fall", "crowd_gathering", "chasing")
+
+
+def _parse_pressure_behavior_rules(value: str) -> tuple[str, ...]:
+    names = tuple(name.strip() for name in value.split(",")) if value.strip() else ()
+    if any(name not in PRESSURE_BEHAVIOR_RULES for name in names):
+        raise argparse.ArgumentTypeError(
+            "behavior rules must be a comma-separated subset of "
+            + ",".join(PRESSURE_BEHAVIOR_RULES)
+        )
+    if len(names) != len(set(names)):
+        raise argparse.ArgumentTypeError("behavior rules must not contain duplicates")
+    return names
+
+
+class PressureArgumentError(SystemExit):
+    def __init__(self, reason: str):
+        super().__init__(2)
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return self.reason
+
+
+class PressureArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise PressureArgumentError(message)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = PressureArgumentParser(
         description="Run a full midterm 60-source pressure test through 8090 runtime control."
     )
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--preflight-without-storage-override", action="store_true")
+    parser.add_argument("--allow-rotational-rolling-cache", action="store_true")
     parser.add_argument("--fps", default=DEFAULT_PRESSURE_FPS, help="Target pressure FPS, e.g. 8/1.")
     parser.add_argument("--min-fps", default="1/1")
     parser.add_argument("--streams", type=int, default=60)
@@ -580,6 +626,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Per source+algorithm cooldown for pressure cameras. Use 60 to cap "
             "a 60-camera, 2-algorithm, 600s run near 1200 events."
         ),
+    )
+    parser.add_argument(
+        "--behavior-rules",
+        type=_parse_pressure_behavior_rules,
+        default=(),
+        help="Additional pressure behavior rules: fall,crowd_gathering,chasing.",
     )
     parser.add_argument(
         "--pressure-pause-redis-rdb",
@@ -1238,8 +1290,129 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+def _readonly_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, check=False, text=True, capture_output=True, timeout=120)
+
+
+def perform_storage_preflight(cfg: PressureConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    from scripts.runtime.rolling_cache_storage_preflight import rolling_cache_storage_preflight
+
+    return rolling_cache_storage_preflight(
+        cfg, compose_base_args=_compose_base_args(cfg, pressure_storage=True), run_command=_readonly_command,
+        retention_s=pressure_rolling_cache_retention_seconds(cfg),
+    )
+
+
+def restore_after_preflight_abort() -> dict[str, Any]:
+    # No mutation is reachable before this guard, so recovery must issue no writes.
+    return {"status": "unchanged", "reason": "aborted_before_any_runtime_or_database_mutation"}
+
+
+def formal_restore_config(cfg: PressureConfig) -> PressureConfig:
+    snapshot = inspect_container("video-analytics-midterm-media-worker")
+    labels = (snapshot.get("Config") or {}).get("Labels") or {}
+    working_dir = Path(labels.get("com.docker.compose.project.working_dir") or "")
+    files = str(labels.get("com.docker.compose.project.config_files") or "").split(",")
+    if not working_dir.is_absolute() or not files or not Path(files[0]).is_absolute():
+        raise StoragePreflightError("formal compose labels unavailable; cannot safely restore")
+    base = Path(files[0]).resolve(strict=True)
+    if base.name != "docker-compose.midterm.yml" or working_dir.resolve(strict=True) not in (base.parent, base.parent.parent):
+        raise StoragePreflightError("formal compose base and working directory disagree")
+    env_file = base.parent / "env" / "midterm.env"
+    if not env_file.is_file() or not base.with_name("midterm-storage.override.yml").is_file():
+        raise StoragePreflightError("formal restore env/storage override missing")
+    return replace(cfg, compose_file=str(base), env_file=str(env_file),
+                   pressure_rolling_cache_host_root="",
+                   pressure_rolling_cache_materialized_host_root="")
+
+
+def pressure_cache_readback(cfg: PressureConfig, expected: dict[str, Any]) -> dict[str, Any]:
+    sinks = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if cfg.dual_shard_same_gpu else ["rolling-cache-sink"]
+    actual: dict[str, dict[str, str]] = {}
+    for service in [*sinks, "media-worker"]:
+        actual[service] = {}
+        for target in (CACHE_TARGETS if service == "media-worker" else CACHE_TARGETS[:1]):
+            source = resolve_container_bind_source([f"video-analytics-midterm-{service}"], target)
+            if source is None:
+                raise StoragePreflightError(f"missing live cache bind: {service}:{target}")
+            actual[service][target] = str(source)
+    return {"status": "passed", "sources": validate_cache_sources(actual, expected=expected)}
+
+
+def restored_cache_readback(cfg: PressureConfig) -> dict[str, Any]:
+    completed = _readonly_command([*_compose_base_args(cfg), "config", "--format", "json"])
+    if completed.returncode:
+        raise StoragePreflightError("formal restore compose rendering failed")
+    try:
+        rendered = json.loads(completed.stdout)
+    except (TypeError, ValueError) as exc:
+        raise StoragePreflightError("formal restore compose rendering is invalid") from exc
+    sinks = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if cfg.dual_shard_same_gpu else ["rolling-cache-sink"]
+    return pressure_cache_readback(cfg, parse_compose_cache_sources(rendered, sinks))
+
+
+def collect_baseline_pollution(conn, cfg: PressureConfig, restore_cfg: PressureConfig) -> dict[str, Any]:
+    sinks = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if cfg.dual_shard_same_gpu else ["rolling-cache-sink"]
+    services = [*sinks, "media-worker"]
+    environments = {}
+    unverified = []
+    for service in services:
+        try:
+            environments[service] = docker_container_env(f"video-analytics-midterm-{service}")
+        except Exception as exc:
+            environments[service] = {}
+            unverified.append(f"{service}.environment:{type(exc).__name__}")
+    limits = {}
+    try:
+        config = _readonly_command([*_compose_base_args(restore_cfg, additional_profiles=("*",)), "config", "--format", "json"])
+        if config.returncode:
+            raise RuntimeError("formal compose config failed")
+        for service, spec in (json.loads(config.stdout).get("services") or {}).items():
+            value = (spec.get("environment") or {}).get("ROLLING_CACHE_RETENTION_SECONDS")
+            if value is not None:
+                limits[service] = int(value)
+    except Exception as exc:
+        unverified.append(f"formal_retention:{type(exc).__name__}")
+    try:
+        cameras = conn.execute(
+            "SELECT id, source_id, site_id, location, enabled FROM cameras ORDER BY name"
+        ).fetchall()
+    except Exception as exc:
+        cameras = None
+        unverified.append(f"camera_population:{type(exc).__name__}")
+    try:
+        rules = conn.execute(
+            "SELECT c.source_id, c.site_id, c.location, r.enabled, r.algorithm_id "
+            "FROM camera_rules r JOIN cameras c ON c.id=r.camera_id WHERE r.enabled=true"
+        ).fetchall()
+    except Exception as exc:
+        rules = None
+        unverified.append(f"camera_rules:{type(exc).__name__}")
+    expected_count = None
+    try:
+        topology = api_json(cfg.api_base, "GET", "/runtime/topology-config")["data"]
+        for check in (topology.get("preflight") or {}).get("checks") or []:
+            if check.get("name") == "profile_enabled_source_count":
+                expected_count = int((check.get("details") or check).get("expected_source_count"))
+                break
+    except Exception as exc:
+        unverified.append(f"runtime_profile:{type(exc).__name__}")
+    result = baseline_pollution(environments=environments, retention_limits=limits,
+                               cameras=cameras, rules=rules, expected_source_count=expected_count)
+    result["unverified"].extend(unverified)
+    write_json(cfg.artifact_dir / "baseline_pollution.json", result)
+    if result["findings"]:
+        write_text(cfg.artifact_dir / "baseline_pollution.md",
+                   '<p style="color:red"><strong>BASELINE POLLUTION</strong></p>\n\n' +
+                   json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        print("\033[31mBASELINE_POLLUTION: see baseline_pollution.json\033[0m", file=sys.stderr)
+    return result
+
+
+def _prepare_pressure_run(argv: list[str]) -> tuple[argparse.Namespace, PressureConfig]:
+    args = parse_args(argv)
+    if args.preflight_without_storage_override and not args.preflight_only:
+        raise SystemExit("--preflight-without-storage-override requires --preflight-only")
     if args.dual_shard_same_gpu and args.forwarder_null_sink:
         raise SystemExit("--dual-shard-same-gpu cannot be combined with --forwarder-null-sink")
     if args.dual_shard_api and not args.dual_shard_same_gpu:
@@ -1368,7 +1541,7 @@ def main(argv: list[str] | None = None) -> int:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     local_rtsp_gateway = (
         docker_network_gateway(args.rtsp_republish_local_server_network)
-        if args.rtsp_republish_local_server
+        if args.rtsp_republish_local_server and not args.preflight_only
         else ""
     )
     rtsp_republish_output_base = args.rtsp_republish_output_base
@@ -1416,6 +1589,7 @@ def main(argv: list[str] | None = None) -> int:
             1,
             int(args.pressure_algorithm_cooldown_s or PRESSURE_COOLDOWN_SECONDS),
         ),
+        behavior_rules=args.behavior_rules,
         artifact_dir=artifact_dir,
         db_url=args.db_url,
         redis_url=args.redis_url,
@@ -1587,7 +1761,21 @@ def main(argv: list[str] | None = None) -> int:
             args.rolling_cache_publication_metadata_layout
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
+        allow_rotational_rolling_cache=bool(args.allow_rotational_rolling_cache),
+        preflight_without_storage_override=bool(args.preflight_without_storage_override),
     )
+    return args, cfg
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args, cfg = _prepare_pressure_run(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            raise
+        raise PressureArgumentError(str(exc)) from None
+    except Exception as exc:
+        raise PressureArgumentError(f"{type(exc).__name__}: {exc}") from None
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1596,6 +1784,26 @@ def main(argv: list[str] | None = None) -> int:
         "steps": [],
     }
     write_json(cfg.artifact_dir / "run_config.json", report["config"])
+    try:
+        report["compose_config"] = compose_config_paths(cfg)
+        storage_report, rendered_pressure_config = perform_storage_preflight(cfg)
+        report["rolling_cache_storage"] = storage_report
+    except Exception as exc:
+        report["rolling_cache_storage"] = preflight_failure_report(exc)
+        report["status"] = "preflight_failed"
+        report["reason"] = report["rolling_cache_storage"]["reason"]
+        report["exit_code"] = 2
+        report["preflight_recovery"] = restore_after_preflight_abort()
+        write_json(cfg.artifact_dir / "report.json", report)
+        return 2
+    if args.preflight_only:
+        report["status"] = "preflight_passed"
+        report["reason"] = "passed"
+        report["exit_code"] = 0
+        write_json(cfg.artifact_dir / "report.json", report)
+        return 0
+    restore_cfg = formal_restore_config(cfg)
+    report["restore_compose_config"] = compose_config_paths(restore_cfg)
     if cfg.pressure_rolling_cache_host_root:
         os.environ["PRESSURE_ROLLING_CACHE_ROOT_HOST"] = (
             cfg.pressure_rolling_cache_host_root
@@ -1671,10 +1879,11 @@ def main(argv: list[str] | None = None) -> int:
         ]
         original_clip_worker_replay_shards = clip_worker_replay_shard_env_snapshot()
         original_event_worker_evidence_env = event_worker_evidence_env_snapshot()
-        original_media_worker_rolling_env = media_worker_rolling_cache_env_snapshot()
+        original_media_worker_rolling_env = media_worker_rolling_cache_env_snapshot(full=True)
         original_rolling_cache_sink_states = rolling_cache_sink_state_snapshot()
+        report["baseline_pollution"] = collect_baseline_pollution(conn, cfg, restore_cfg)
         if cfg.cpu_isolation_profile != "none":
-            original_worker_cpu_isolation = apply_worker_cpu_isolation(cfg)
+            original_worker_cpu_isolation = apply_worker_cpu_isolation(cfg, restore_cfg=restore_cfg)
             report["cpu_isolation_apply"] = original_worker_cpu_isolation
         original_cameras = fetch_cameras(conn)
         write_json(cfg.artifact_dir / "cameras_before.json", original_cameras)
@@ -1787,6 +1996,8 @@ def main(argv: list[str] | None = None) -> int:
             report["rtsp_republish_local_server"] = rtsp_republish_local_server
         rtsp_republishers = start_rtsp_republishers(cfg)
         report["pressure_camera_provisioning"] = insert_pressure_cameras(conn, cfg)
+        report["config"]["enabled_rule_readback"] = report["pressure_camera_provisioning"].get("enabled_rule_readback")
+        write_json(cfg.artifact_dir / "run_config.json", report["config"])
         if cfg.dual_shard_same_gpu:
             if cfg.dual_shard_api:
                 start_dual_shard_runtime(cfg)
@@ -1921,6 +2132,18 @@ def main(argv: list[str] | None = None) -> int:
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
             report["steps"].append({"name": "runtime_started", "runtime_epoch_root": runtime_epoch_root})
 
+        if cfg.rolling_cache_evidence:
+            report["rolling_cache_storage"]["post_recreate"] = pressure_cache_readback(
+                cfg, report["rolling_cache_storage"]["services"])
+        try:
+            selection = runtime_readback_services(cfg)
+            expected_env = expected_forwarder_environment(rendered_pressure_config, selection["forwarders"])
+            report["runtime_config_readback"] = collect_runtime_readback(
+                cfg, expected_forwarder_env=expected_env, docker_env=docker_container_env,
+                run_command=_readonly_command, source_root=REPO_ROOT)
+        except RuntimeReadbackError as exc:
+            report["runtime_config_readback"] = exc.report
+            raise
         if original_worker_cpu_isolation is not None:
             report["cpu_isolation_reapply"] = reapply_worker_cpu_isolation(cfg)
         report["pressure_source_visibility"] = wait_for_pressure_source_visibility(
@@ -1954,6 +2177,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         report["config"] = _jsonable_config(cfg)
+        report["config"]["enabled_rule_readback"] = report["pressure_camera_provisioning"].get("enabled_rule_readback")
         write_json(cfg.artifact_dir / "run_config.json", report["config"])
         report["pressure_sampling_window"] = sample_runtime(
             cfg,
@@ -1974,6 +2198,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         report["config"] = _jsonable_config(cfg)
+        report["config"]["enabled_rule_readback"] = report["pressure_camera_provisioning"].get("enabled_rule_readback")
         write_json(cfg.artifact_dir / "run_config.json", report["config"])
         report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
         if cfg.rolling_cache_evidence:
@@ -2227,7 +2452,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             original_postgres_checkpoint_settings = None
         restore_cameras(conn, original_cameras)
-        restore_runtime(cfg, original_perf)
         if cfg.rolling_cache_evidence:
             report["evidence_task_gate_cleanup"] = (
                 clear_pressure_evidence_task_gate(redis_client, cfg)
@@ -2236,7 +2460,7 @@ def main(argv: list[str] | None = None) -> int:
             report["cuda_mps_stop"] = read_cuda_mps_stop_summary(cfg)
         if original_clip_worker_replay_shards is not None:
             report["clip_worker_replay_shards_restore"] = configure_clip_worker_replay_shards(
-                cfg,
+                restore_cfg,
                 replay_shards_json=original_clip_worker_replay_shards.get(
                     "REPLAY_SHARDS_JSON",
                     "",
@@ -2268,7 +2492,7 @@ def main(argv: list[str] | None = None) -> int:
         if original_event_worker_evidence_env is not None:
             report["event_worker_evidence_admission_restore"] = (
                 configure_event_worker_evidence_admission(
-                    cfg,
+                    restore_cfg,
                     values=original_event_worker_evidence_env,
                     artifact_name="compose_restore_event_worker_evidence_admission.log",
                 )
@@ -2276,14 +2500,14 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
             report["media_worker_rolling_cache_restore"] = (
                 configure_media_worker_rolling_cache(
-                    cfg,
+                    restore_cfg,
                     values=original_media_worker_rolling_env,
                     artifact_name="compose_restore_media_worker_rolling_cache.log",
                 )
             )
         if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
             report["rolling_cache_sinks_restore"] = restore_rolling_cache_sinks_after_pressure(
-                cfg,
+                restore_cfg,
                 original_states=original_rolling_cache_sink_states,
                 artifact_name="compose_restore_rolling_cache_sinks.log",
             )
@@ -2292,12 +2516,13 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 report["rolling_cache_sinks_stop_after_pressure"] = (
                     stop_rolling_cache_sinks_after_pressure(
-                        cfg,
+                        restore_cfg,
                         artifact_name="compose_stop_rolling_cache_sinks_after_pressure.log",
                     )
                 )
         if original_topology is not None:
             api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
+        restore_runtime(restore_cfg, original_perf)
         if cfg.cleanup and cfg.discard_pressure_results:
             report["cleanup_after_restore"] = cleanup_pressure_data(
                 conn,
@@ -2317,7 +2542,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if original_worker_cpu_isolation is not None:
             report["cpu_isolation_restore"] = restore_worker_cpu_isolation(
-                cfg,
+                restore_cfg,
                 original_worker_cpu_isolation,
             )
             original_worker_cpu_isolation = None
@@ -2328,6 +2553,8 @@ def main(argv: list[str] | None = None) -> int:
             sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
         )
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
+        if cfg.rolling_cache_evidence:
+            report["rolling_cache_storage"]["post_restore"] = restored_cache_readback(restore_cfg)
         if pressure_cache_host_mounts_prepared:
             report["pressure_cache_host_mounts_cleanup"] = (
                 cleanup_pressure_cache_host_mounts(cfg)
@@ -2359,11 +2586,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             if original_cameras:
                 restore_cameras(conn, original_cameras)
-            if original_perf:
-                restore_runtime(cfg, original_perf)
             if original_clip_worker_replay_shards is not None:
                 configure_clip_worker_replay_shards(
-                    cfg,
+                    restore_cfg,
                     replay_shards_json=original_clip_worker_replay_shards.get(
                         "REPLAY_SHARDS_JSON",
                         "",
@@ -2394,24 +2619,26 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if original_event_worker_evidence_env is not None:
                 configure_event_worker_evidence_admission(
-                    cfg,
+                    restore_cfg,
                     values=original_event_worker_evidence_env,
                     artifact_name="compose_restore_event_worker_evidence_admission_after_interrupt.log",
                 )
             if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
                 configure_media_worker_rolling_cache(
-                    cfg,
+                    restore_cfg,
                     values=original_media_worker_rolling_env,
                     artifact_name="compose_restore_media_worker_rolling_cache_after_interrupt.log",
                 )
             if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
                 restore_rolling_cache_sinks_after_pressure(
-                    cfg,
+                    restore_cfg,
                     original_states=original_rolling_cache_sink_states,
                     artifact_name="compose_restore_rolling_cache_sinks_after_interrupt.log",
                 )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
+            if original_perf:
+                restore_runtime(restore_cfg, original_perf)
         finally:
             return 130
     except Exception as exc:
@@ -2433,11 +2660,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             if original_cameras:
                 restore_cameras(conn, original_cameras)
-            if original_perf:
-                restore_runtime(cfg, original_perf)
             if original_clip_worker_replay_shards is not None:
                 configure_clip_worker_replay_shards(
-                    cfg,
+                    restore_cfg,
                     replay_shards_json=original_clip_worker_replay_shards.get(
                         "REPLAY_SHARDS_JSON",
                         "",
@@ -2468,32 +2693,29 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if original_event_worker_evidence_env is not None:
                 configure_event_worker_evidence_admission(
-                    cfg,
+                    restore_cfg,
                     values=original_event_worker_evidence_env,
                     artifact_name="compose_restore_event_worker_evidence_admission_after_failure.log",
                 )
             if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
                 configure_media_worker_rolling_cache(
-                    cfg,
+                    restore_cfg,
                     values=original_media_worker_rolling_env,
                     artifact_name="compose_restore_media_worker_rolling_cache_after_failure.log",
                 )
             if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
                 restore_rolling_cache_sinks_after_pressure(
-                    cfg,
+                    restore_cfg,
                     original_states=original_rolling_cache_sink_states,
                     artifact_name="compose_restore_rolling_cache_sinks_after_failure.log",
                 )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
+            if original_perf:
+                restore_runtime(restore_cfg, original_perf)
         finally:
             return 1
     finally:
-        if pressure_cache_host_mounts_prepared:
-            try:
-                cleanup_pressure_cache_host_mounts(cfg)
-            except Exception:
-                pass
         if original_postgres_checkpoint_settings is not None:
             try:
                 restore_postgres_checkpoints_after_pressure(
@@ -2529,9 +2751,21 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         if original_worker_cpu_isolation is not None:
             try:
-                restore_worker_cpu_isolation(cfg, original_worker_cpu_isolation)
-            except Exception:
-                pass
+                restore_worker_cpu_isolation(restore_cfg, original_worker_cpu_isolation)
+            except Exception as exc:
+                report["cpu_isolation_restore_error"] = repr(exc)
+                report["status"] = "failed_restore_verification"
+        if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+            try:
+                report["rolling_cache_storage"]["post_restore"] = restored_cache_readback(restore_cfg)
+                if pressure_cache_host_mounts_prepared:
+                    report["pressure_cache_host_mounts_cleanup"] = cleanup_pressure_cache_host_mounts(cfg)
+            except Exception as exc:
+                report["status"] = "failed_restore_verification"
+                report["restore_verification_error"] = repr(exc)
+                report["pressure_cache_host_mounts_cleanup"] = {
+                    "status": "preserved", "reason": "restore_not_verified"
+                }
         try:
             if original_module_config_exists:
                 _atomic_write_text(
@@ -2542,11 +2776,13 @@ def main(argv: list[str] | None = None) -> int:
                 DEFAULT_MODULE_CONFIG_PATH.unlink(missing_ok=True)
         except Exception:
             pass
-        try:
-            precreate_operator_dual_runtime_after_pressure(cfg)
-        except Exception:
-            pass
+        report["operator_dual_runtime_precreate"] = {
+            "status": "skipped", "reason": "preserve_snapshotted_runtime_environment_and_state"
+        }
+        write_json(cfg.artifact_dir / "report.json", report)
         conn.close()
+        if report.get("status") == "failed_restore_verification":
+            return 1
 
 
 def precreate_operator_dual_runtime_after_pressure(cfg: PressureConfig) -> dict[str, Any]:
@@ -2880,6 +3116,62 @@ def fetch_cameras(conn) -> list[dict[str, Any]]:
     return [_row_json(row) for row in rows]
 
 
+def compose_config_paths(cfg: PressureConfig) -> dict[str, Any]:
+    compose_file = Path(cfg.compose_file).resolve()
+    storage_override = compose_file.with_name("midterm-storage.override.yml")
+    return {
+        "compose_file": str(compose_file),
+        "env_file": str(Path(cfg.env_file).resolve()),
+        "storage_override": (
+            str(storage_override)
+            if storage_override.is_file() and not getattr(cfg, "preflight_without_storage_override", False)
+            else None
+        ),
+        "profiles": (
+            [DUAL_SHARD_PROFILE, "rolling-cache-dual"]
+            if getattr(cfg, "dual_shard_same_gpu", False) else ["rolling-cache"]
+        ),
+    }
+
+
+def compose_invocation_args(
+    cfg: PressureConfig, *, additional_profiles: tuple[str, ...] = (),
+    pressure_storage: bool = False, override_files: tuple[str | Path, ...] = (),
+) -> list[str]:
+    paths = compose_config_paths(cfg)
+    args = [
+        "docker", "compose", "--env-file", str(paths["env_file"]),
+        "-f", str(paths["compose_file"]),
+    ]
+    if paths["storage_override"]:
+        args.extend(["-f", str(paths["storage_override"])])
+    if pressure_storage:
+        from scripts.runtime.rolling_cache_storage_preflight import pressure_storage_override
+
+        dual_shard = bool(getattr(cfg, "dual_shard_same_gpu", False))
+        if dual_shard:
+            args.extend(["-f", str(write_dual_shard_same_gpu_compose_override(cfg))])
+        sinks = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if dual_shard else ["rolling-cache-sink"]
+        overlay = pressure_storage_override(cfg, sinks)
+        if overlay is not None:
+            args.extend(["-f", str(overlay)])
+    for path in override_files:
+        args.extend(["-f", str(Path(path).resolve())])
+    for profile in dict.fromkeys((*paths["profiles"], *additional_profiles)):
+        args.extend(["--profile", profile])
+    return args
+
+
+def _compose_base_args(
+    cfg: PressureConfig, *, additional_profiles: tuple[str, ...] = (),
+    pressure_storage: bool = False, override_files: tuple[str | Path, ...] = (),
+) -> list[str]:
+    return compose_invocation_args(
+        cfg, additional_profiles=additional_profiles,
+        pressure_storage=pressure_storage, override_files=override_files,
+    )
+
+
 def set_compose_operating_point(cfg: PressureConfig) -> None:
     env = os.environ.copy()
     updates = {
@@ -2906,14 +3198,10 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
     env.update(updates)
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             *services,
@@ -2926,12 +3214,7 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
 def stop_single_inference_runtime_for_dual_pressure(cfg: PressureConfig) -> None:
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg),
             "stop",
             *DUAL_SHARD_SINGLE_SERVICES,
         ],
@@ -2970,18 +3253,12 @@ def start_dual_shard_runtime(cfg: PressureConfig) -> None:
     )
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg, additional_profiles=(DUAL_SHARD_PROFILE,)),
             "-f",
             str(override_path),
-            "--profile",
-            DUAL_SHARD_PROFILE,
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             *dual_shard_services(cfg),
@@ -2993,19 +3270,9 @@ def start_dual_shard_runtime(cfg: PressureConfig) -> None:
 
 
 def stop_dual_shard_runtime(cfg: PressureConfig) -> None:
-    override_path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
-    compose = [
-        "docker",
-        "compose",
-        "--env-file",
-        cfg.env_file,
-        "-f",
-        cfg.compose_file,
-    ]
-    if override_path.exists():
-        compose.extend(["-f", str(override_path)])
+    compose = _compose_base_args(cfg, additional_profiles=(DUAL_SHARD_PROFILE,))
     compose.extend(
-        ["--profile", DUAL_SHARD_PROFILE, "stop", *dual_shard_services(cfg)]
+        ["stop", *dual_shard_services(cfg)]
     )
     run(
         compose,
@@ -3063,14 +3330,7 @@ def stop_legacy_replay_services_for_direct_rolling_cache(
     }
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
-            "--profile",
-            DUAL_SHARD_PROFILE,
+            *_compose_base_args(cfg, additional_profiles=(DUAL_SHARD_PROFILE,)),
             "stop",
             *DUAL_SHARD_DIRECT_ROLLING_DISABLED_SERVICES,
         ],
@@ -3118,22 +3378,14 @@ def adaface_central_metrics_urls(cfg: PressureConfig) -> dict[str, str]:
 
 def recreate_dual_video_sinks_for_current_epoch(cfg: PressureConfig) -> None:
     override_path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
-    compose = [
-        "docker",
-        "compose",
-        "--env-file",
-        cfg.env_file,
-        "-f",
-        cfg.compose_file,
-    ]
+    compose = _compose_base_args(cfg, additional_profiles=(DUAL_SHARD_PROFILE,))
     if override_path.exists():
         compose.extend(["-f", str(override_path)])
     compose.extend(
         [
-            "--profile",
-            DUAL_SHARD_PROFILE,
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             "video-file-sink-a",
@@ -4150,7 +4402,11 @@ def docker_container_env(name: str) -> dict[str, str]:
     return result
 
 
-def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
+def apply_worker_cpu_isolation(
+    cfg: PressureConfig,
+    *,
+    restore_cfg: PressureConfig | None = None,
+) -> dict[str, Any]:
     profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
     target_cpuset = str(profile.get("workers") or "")
     available_cpus = int(os.cpu_count() or 1)
@@ -4171,15 +4427,29 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
         "containers": {},
     }
     for container in containers:
+        inspected = inspect_container(container)
+        environment = {}
+        for value in (inspected.get("Config") or {}).get("Env") or []:
+            key, separator, item = value.partition("=")
+            if separator:
+                environment[key] = item
+        if not environment or not inspected.get("Image") or not isinstance((inspected.get("State") or {}).get("Running"), bool):
+            raise RuntimeError(f"incomplete worker restoration snapshot for {container}")
         container_target_cpuset = _worker_target_cpuset(profile, container)
-        original = docker_container_cpuset(container)
+        original = str((inspected.get("HostConfig") or {}).get("CpusetCpus") or "")
         row = {
             "original_cpuset": original,
             "target_cpuset": container_target_cpuset,
             "applied": False,
             "error": "",
+            "environment": environment,
+            "image": inspected["Image"],
+            "running": inspected["State"]["Running"],
         }
         snapshot["containers"][container] = row
+    write_json(cfg.artifact_dir / "cpu_isolation_before.json", snapshot)
+    for container, row in snapshot["containers"].items():
+        container_target_cpuset = row["target_cpuset"]
         if container_target_cpuset:
             completed = subprocess.run(
                 [
@@ -4205,7 +4475,7 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
                     if completed.returncode != 0
                     else f"observed cpuset {observed!r}"
                 )
-                restore_worker_cpu_isolation(cfg, snapshot)
+                restore_worker_cpu_isolation(restore_cfg or cfg, snapshot)
                 raise RuntimeError(
                     f"failed to apply worker cpuset container={container}: {row['error']}"
                 )
@@ -4304,6 +4574,10 @@ def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) 
     result: dict[str, Any] = {"profile": snapshot.get("profile"), "containers": {}}
     recreate: list[tuple[str, str]] = []
     for container, original in (snapshot.get("containers") or {}).items():
+        if not str((original or {}).get("original_cpuset") or ""):
+            if not original.get("environment") or not original.get("image") or not isinstance(original.get("running"), bool):
+                raise RuntimeError(f"incomplete worker restoration snapshot for {container}")
+    for container, original in (snapshot.get("containers") or {}).items():
         cpuset = str((original or {}).get("original_cpuset") or "")
         if not cpuset:
             service = WORKER_COMPOSE_SERVICES.get(container)
@@ -4330,47 +4604,57 @@ def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) 
             ),
         }
     if recreate:
-        storage_override = Path(cfg.compose_file).with_name(
-            "midterm-storage.override.yml"
-        )
-        compose = [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
-        ]
-        if storage_override.is_file():
-            compose.extend(["-f", str(storage_override)])
-        compose.extend(
-            [
-                "up",
-                "-d",
-                "--no-deps",
-                "--force-recreate",
-                *[service for _container, service in recreate],
+        override_path = cfg.artifact_dir / "compose_restore_worker_cpu_isolation.override.yml"
+        write_text(override_path, yaml.safe_dump({"services": {
+            service: {
+                "image": snapshot["containers"][container]["image"], "cpuset": "",
+                "environment": {key: str(value).replace("$", "$$") for key, value in snapshot["containers"][container]["environment"].items()},
+            }
+            for container, service in recreate
+        }}, sort_keys=False))
+        completions = {}
+        for running in (False, True):
+            targets = [(container, service) for container, service in recreate if snapshot["containers"][container]["running"] is running]
+            if not targets:
+                continue
+            command = [
+                *_compose_base_args(cfg), "-f", str(override_path), "up",
+                *( ["-d"] if running else ["--no-start"] ),
+                "--no-build", "--no-deps", "--force-recreate",
+                *[service for _container, service in targets],
             ]
-        )
-        completed = run(
-            compose,
-            cfg.artifact_dir / "compose_restore_worker_cpu_isolation.log",
-            check=False,
-        )
+            completed = run(command, cfg.artifact_dir / ("compose_restore_worker_cpu_isolation_running.log" if running else "compose_restore_worker_cpu_isolation_stopped.log"), check=False)
+            completions.update({container: completed for container, _service in targets})
         for container, _service in recreate:
+            completed = completions[container]
             observed = docker_container_cpuset(container)
+            inspected = inspect_container(container)
+            original = snapshot["containers"][container]
+            environment = {}
+            for value in (inspected.get("Config") or {}).get("Env") or []:
+                key, separator, item = value.partition("=")
+                if separator:
+                    environment[key] = item
+            verification = {
+                "environment_matches": environment == original["environment"],
+                "image_matches": inspected.get("Image") == original["image"],
+                "running_matches": (inspected.get("State") or {}).get("Running") is original["running"],
+            }
             result["containers"][container] = {
                 "restored_cpuset": "",
                 "observed_cpuset": observed,
                 "method": "compose_recreate",
-                "ok": completed.returncode == 0 and observed == "",
+                "ok": completed.returncode == 0 and observed == "" and all(verification.values()),
+                "snapshot_verification": verification,
                 "error": (
                     f"compose recreate rc={completed.returncode}"
                     if completed.returncode != 0
-                    else ("" if observed == "" else f"observed cpuset {observed!r}")
+                    else ("" if observed == "" and all(verification.values()) else f"observed cpuset {observed!r}; snapshot={verification}")
                 ),
             }
     write_json(cfg.artifact_dir / "cpu_isolation_restore.json", result)
+    if any(not row["ok"] for row in result["containers"].values()):
+        raise RuntimeError("worker CPU restoration differs from original snapshot")
     return result
 
 
@@ -4501,8 +4785,10 @@ def event_worker_evidence_env_snapshot() -> dict[str, str]:
     return result
 
 
-def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
+def media_worker_rolling_cache_env_snapshot(*, full: bool = False) -> dict[str, str]:
     env = docker_container_env("video-analytics-midterm-media-worker")
+    if full:
+        return env
     keys = (
         "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE",
         "MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT",
@@ -4559,10 +4845,16 @@ def rolling_cache_sink_state_snapshot() -> dict[str, dict[str, Any]]:
         "rolling-cache-sink-a": "video-analytics-midterm-rolling-cache-sink-a",
         "rolling-cache-sink-b": "video-analytics-midterm-rolling-cache-sink-b",
     }
-    return {
-        service: docker_container_state(container)
-        for service, container in containers.items()
-    }
+    snapshot = {}
+    for service, container in containers.items():
+        state = docker_container_state(container)
+        state["environment"] = (
+            docker_container_env(container) if state.get("exists") else {}
+        )
+        if state.get("exists") and not state["environment"]:
+            raise RuntimeError(f"missing environment snapshot for {container}")
+        snapshot[service] = state
+    return snapshot
 
 
 def pressure_source_ids(cfg: PressureConfig) -> list[str]:
@@ -4610,17 +4902,16 @@ def configure_media_worker_rolling_cache(
     *,
     values: dict[str, str],
     artifact_name: str,
+    pressure: bool = False,
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(values)
     override_path = cfg.artifact_dir / artifact_name.replace(
         ".log", ".override.yml"
     )
-    service_override: dict[str, Any] = {"environment": values}
-    if values.get("ROLLING_CACHE_ENABLED") == "true":
-        cache_volumes = pressure_cache_volume_overrides(cfg, materialized=True)
-        if cache_volumes:
-            service_override["volumes"] = cache_volumes
+    service_override: dict[str, Any] = {
+        "environment": {key: str(value).replace("$", "$$") for key, value in values.items()}
+    }
     write_text(
         override_path,
         yaml.safe_dump(
@@ -4630,16 +4921,13 @@ def configure_media_worker_rolling_cache(
     )
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
-            "-f",
-            str(override_path),
+            *_compose_base_args(
+                cfg, pressure_storage=pressure and values.get("ROLLING_CACHE_ENABLED") == "true",
+                override_files=(override_path,),
+            ),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             "media-worker",
@@ -4647,7 +4935,11 @@ def configure_media_worker_rolling_cache(
         cfg.artifact_dir / artifact_name,
         env=env,
     )
-    observed = media_worker_rolling_cache_env_snapshot()
+    observed = (
+        media_worker_rolling_cache_env_snapshot()
+        if pressure
+        else media_worker_rolling_cache_env_snapshot(full=True)
+    )
     summary = {"requested": values, "observed": observed}
     write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
     for key, expected in values.items():
@@ -4717,35 +5009,12 @@ def start_rolling_cache_sinks_for_pressure(
             ),
         }
     )
-    override_path = cfg.artifact_dir / "compose.rolling-cache-pressure-storage.override.yml"
-    cache_volumes = pressure_cache_volume_overrides(cfg, materialized=False)
-    compose_override_args: list[str] = []
-    if cache_volumes:
-        write_text(
-            override_path,
-            yaml.safe_dump(
-                {
-                    "services": {
-                        service: {"volumes": cache_volumes}
-                        for service in services
-                    }
-                },
-                sort_keys=False,
-            ),
-        )
-        compose_override_args = ["-f", str(override_path)]
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
-            *compose_override_args,
-            *[item for profile in profiles for item in ("--profile", profile)],
+            *_compose_base_args(cfg, pressure_storage=True),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             *services,
@@ -4900,13 +5169,7 @@ def stop_rolling_cache_sinks_before_pressure_reconfigure(
         services = ["rolling-cache-sink"]
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
-            *[item for profile in profiles for item in ("--profile", profile)],
+            *_compose_base_args(cfg),
             "stop",
             *services,
         ],
@@ -4941,6 +5204,30 @@ def restore_rolling_cache_sinks_after_pressure(
     else:
         profiles = ["rolling-cache"]
         services = ["rolling-cache-sink"]
+    expected_env = {}
+    for service in services:
+        original_env = (original_states.get(service) or {}).get("environment")
+        if not isinstance(original_env, dict) or not original_env:
+            raise RuntimeError(f"missing environment snapshot for {service}")
+        expected_env[service] = dict(original_env)
+    override_path = cfg.artifact_dir / artifact_name.replace(".log", ".environment.override.yml")
+    write_text(
+        override_path,
+        yaml.safe_dump(
+            {
+                "services": {
+                    service: {
+                        "environment": {
+                            key: str(value).replace("$", "$$")
+                            for key, value in values.items()
+                        }
+                    }
+                    for service, values in expected_env.items()
+                }
+            },
+            sort_keys=False,
+        ),
+    )
     services_to_stop = [
         service
         for service in services
@@ -4952,13 +5239,8 @@ def restore_rolling_cache_sinks_after_pressure(
         if bool((original_states.get(service) or {}).get("running"))
     ]
     compose_prefix = [
-        "docker",
-        "compose",
-        "--env-file",
-        cfg.env_file,
-        "-f",
-        cfg.compose_file,
-        *[item for profile in profiles for item in ("--profile", profile)],
+        *_compose_base_args(cfg),
+        "-f", str(override_path),
     ]
     restore_env, sanitized_inherited_env_keys = (
         daily_rolling_cache_sink_restore_process_env()
@@ -5010,7 +5292,6 @@ def restore_rolling_cache_sinks_after_pressure(
         if bool((after.get(service) or {}).get("running"))
         != (service in services_to_start)
     }
-    daily_expected_env = daily_rolling_cache_sink_env(cfg)
     restored_raw_env = {
         service: docker_container_env(
             "video-analytics-midterm-rolling-cache-sink"
@@ -5019,21 +5300,15 @@ def restore_rolling_cache_sinks_after_pressure(
         )
         for service in services
     }
-    restored_env = {
-        service: {
-            key: raw_env.get(key, "")
-            for key in ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS
-        }
-        for service, raw_env in restored_raw_env.items()
-    }
+    restored_env = restored_raw_env
     env_mismatches = {
         service: {
             key: {
-                "expected": daily_expected_env[key],
-                "observed": observed.get(key, ""),
+                "expected": expected_env[service].get(key),
+                "observed": observed.get(key),
             }
-            for key in ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS
-            if observed.get(key, "") != daily_expected_env[key]
+            for key in set(observed) | set(expected_env[service])
+            if observed.get(key) != expected_env[service].get(key)
         }
         for service, observed in restored_env.items()
     }
@@ -5052,7 +5327,7 @@ def restore_rolling_cache_sinks_after_pressure(
         "after": after,
         "state_mismatches": state_mismatches,
         "sanitized_inherited_env_keys": sanitized_inherited_env_keys,
-        "daily_expected_env": daily_expected_env,
+        "expected_env": expected_env,
         "restored_env": restored_env,
         "env_mismatches": env_mismatches,
     }
@@ -5325,6 +5600,8 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL": str(
             cfg.media_worker_rolling_max_per_poll
         ),
+        "ROLLING_CACHE_MATERIALIZATION_CANDIDATE_LOOKAHEAD": "4",
+        "ROLLING_CACHE_MATERIALIZATION_AGING_SECONDS": "60",
         "ROLLING_CACHE_MATERIALIZATION_WORKERS": str(
             cfg.media_worker_rolling_remux_workers
         ),
@@ -5364,6 +5641,7 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
             cfg,
             values=media_values,
             artifact_name="compose_recreate_media_worker_rolling_cache.log",
+            pressure=True,
         ),
     }
 
@@ -5388,16 +5666,12 @@ def configure_event_worker_evidence_admission(
     )
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg),
             "-f",
             str(override_path),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             "event-worker",
@@ -5545,14 +5819,10 @@ def configure_clip_worker_replay_shards(
         )
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             "clip-worker",
@@ -5725,6 +5995,125 @@ def pressure_camera_location(index: int) -> str:
     return f"pressure-{index:02d}"
 
 
+def pressure_requested_algorithm_ids(cfg: PressureConfig) -> list[str]:
+    names = tuple(cfg.behavior_rules)
+    if any(name not in PRESSURE_BEHAVIOR_RULES for name in names) or len(names) != len(set(names)):
+        raise ValueError(f"unsupported or duplicate pressure behavior rules: {names!r}")
+    return ["behavior.intrusion", "face.watchlist", *(f"behavior.{name}" for name in names)]
+
+
+def pressure_behavior_rule_defaults(
+    names: tuple[str, ...], *, registry_path: Path | None = None
+) -> dict[str, dict[str, Any]]:
+    """Read API defaults without importing API code or executing its registry."""
+    if not names:
+        return {}
+    if any(name not in PRESSURE_BEHAVIOR_RULES for name in names) or len(names) != len(set(names)):
+        raise ValueError(f"unsupported or duplicate pressure behavior rules: {names!r}")
+    path = registry_path or REPO_ROOT / "services/api/app/algorithm_registry.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        declarations = [
+            node for node in tree.body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name) and node.target.id == "_REGISTRY"
+        ]
+        if len(declarations) != 1 or not isinstance(declarations[0].value, ast.Dict):
+            raise ValueError("expected one literal annotated _REGISTRY dictionary")
+        registry = declarations[0].value
+        keys = []
+        for key in registry.keys:
+            if isinstance(key, ast.Name) and key.id == "FACE_INTELLIGENCE_ALGORITHM_ID":
+                imported = any(
+                    isinstance(node, ast.ImportFrom) and node.module == "app.algorithm_ids"
+                    and any(alias.name == key.id and alias.asname is None for alias in node.names)
+                    for node in tree.body
+                )
+                constants = ast.parse(path.with_name("algorithm_ids.py").read_text(encoding="utf-8"))
+                assignments = [
+                    node.value for node in constants.body
+                    if isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == key.id
+                ]
+                if not imported or len(assignments) != 1:
+                    raise ValueError("unexpected face algorithm registry constant")
+                keys.append(ast.literal_eval(assignments[0]))
+            else:
+                keys.append(ast.literal_eval(key))
+        if any(not isinstance(key, str) for key in keys) or len(keys) != len(set(keys)):
+            raise ValueError("expected unique literal registry keys")
+        definitions = dict(zip(keys, registry.values))
+        result: dict[str, dict[str, Any]] = {}
+        for name in names:
+            algorithm_id = f"behavior.{name}"
+            definition = definitions.get(algorithm_id)
+            if not isinstance(definition, ast.Call) or not isinstance(definition.func, ast.Name):
+                raise ValueError(f"unexpected definition for {algorithm_id}")
+            if definition.func.id != "AlgorithmDefinition" or definition.args:
+                raise ValueError(f"unexpected definition constructor for {algorithm_id}")
+            keywords = {keyword.arg: keyword.value for keyword in definition.keywords}
+            if None in keywords or len(keywords) != len(definition.keywords):
+                raise ValueError(f"dynamic or duplicate definition keywords for {algorithm_id}")
+            if ast.literal_eval(keywords["algorithm_id"]) != algorithm_id:
+                raise ValueError(f"definition ID differs for {algorithm_id}")
+            config_node = keywords["default_config"]
+            if not isinstance(config_node, ast.Dict):
+                raise ValueError(f"expected literal default_config for {algorithm_id}")
+            config = ast.literal_eval(config_node)
+            if not config or not all(isinstance(key, str) for key in config):
+                raise ValueError(f"expected nonempty config with string keys for {algorithm_id}")
+            cooldown = config.get("cooldown_s")
+            if type(cooldown) not in (int, float) or cooldown <= 0:
+                raise ValueError(f"expected positive default cooldown_s for {algorithm_id}")
+            json.dumps(config, allow_nan=False)
+            result[name] = config
+        return result
+    except (OSError, SyntaxError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(f"pressure behavior registry cannot be read safely: {path}: {exc}") from exc
+
+
+def verify_pressure_camera_rules(
+    conn, cfg: PressureConfig, camera_ids: list[str]
+) -> dict[str, Any]:
+    requested = pressure_requested_algorithm_ids(cfg)
+    rows = conn.execute(
+        """
+        SELECT id, camera_id, zone_id, rule_id, rule_type, algorithm_id,
+               config, evidence_policy
+        FROM camera_rules
+        WHERE camera_id=ANY(%s::uuid[]) AND enabled=true
+        ORDER BY camera_id, algorithm_id, id
+        """,
+        (camera_ids,),
+    ).fetchall()
+    cameras = {camera_id: {"enabled_rules": []} for camera_id in camera_ids}
+    mismatches: list[dict[str, Any]] = []
+    for row in rows:
+        rule = _row_json(row)
+        camera_id = str(rule.get("camera_id", ""))
+        cameras.setdefault(camera_id, {"enabled_rules": []})["enabled_rules"].append(rule)
+    for camera_id, camera in cameras.items():
+        observed = [str(rule.get("algorithm_id") or "") for rule in camera["enabled_rules"]]
+        camera["observed_algorithm_ids"] = observed
+        if camera_id not in camera_ids or sorted(observed) != sorted(requested):
+            mismatches.append({
+                "camera_id": camera_id,
+                "requested_algorithm_ids": requested,
+                "observed_algorithm_ids": observed,
+            })
+    report = {
+        "status": "failed" if mismatches else "passed",
+        "readback_scope": "provisioning_transaction",
+        "requested_algorithm_ids": requested,
+        "cameras": cameras,
+        "mismatches": mismatches,
+    }
+    write_json(cfg.artifact_dir / "pressure_camera_rules.json", report)
+    if mismatches:
+        raise RuntimeError(f"pressure camera rules do not match the request: {mismatches}")
+    return report
+
+
 def _ensure_pressure_rule(
     conn,
     *,
@@ -5802,6 +6191,9 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
     """
     created: list[str] = []
     reused: list[str] = []
+    camera_ids: list[str] = []
+    pressure_requested_algorithm_ids(cfg)
+    behavior_defaults = pressure_behavior_rule_defaults(tuple(cfg.behavior_rules))
     with conn.transaction():
         conn.execute("UPDATE cameras SET enabled=false, updated_at=now()")
         for index in range(cfg.stream_count):
@@ -5878,6 +6270,14 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
                     ),
                 )
                 reused.append(camera_id)
+            camera_ids.append(camera_id)
+            conn.execute(
+                """
+                UPDATE camera_rules SET enabled=false, updated_at=now()
+                WHERE camera_id=%s
+                """,
+                (camera_id,),
+            )
             conn.execute(
                 """
                 INSERT INTO camera_zones (
@@ -5937,6 +6337,25 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
                 config=watchlist_config,
                 evidence_policy=watchlist_evidence_policy,
             )
+            for name in cfg.behavior_rules:
+                behavior_config = copy.deepcopy(behavior_defaults[name])
+                behavior_config.update(
+                    zone=zone_id,
+                    zone_id=zone_id,
+                    severity="medium",
+                    cooldown_s=cfg.pressure_algorithm_cooldown_s,
+                )
+                _ensure_pressure_rule(
+                    conn,
+                    camera_id=camera_id,
+                    zone_id=zone_id,
+                    rule_type=name,
+                    algorithm_id=f"behavior.{name}",
+                    rule_id=f"{location}_{name}",
+                    config=behavior_config,
+                    evidence_policy=evidence_policy,
+                )
+        enabled_rule_readback = verify_pressure_camera_rules(conn, cfg, camera_ids)
     return {
         "camera_slots_requested": cfg.stream_count,
         "created_count": len(created),
@@ -5944,6 +6363,7 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
         "created_camera_ids": created,
         "reused_camera_ids": reused,
         "source_ids": pressure_source_ids(cfg),
+        "enabled_rule_readback": enabled_rule_readback,
     }
 
 
@@ -6848,6 +7268,7 @@ def sample_runtime(
                 )["data"]
             if isinstance(overview, dict):
                 confirm_forwarder_queue_depth(cfg, overview)
+                record_forwarder_queue_capacities(cfg, overview)
                 overview["_pressure_sample_observed_at"] = datetime.now(
                     timezone.utc
                 ).isoformat()
@@ -6878,6 +7299,55 @@ def sample_runtime(
     }
     write_json(cfg.artifact_dir / "pressure_sampling_window.json", summary)
     return summary
+
+
+def record_forwarder_queue_capacities(
+    cfg: PressureConfig,
+    overview: dict[str, Any],
+) -> None:
+    forwarder = overview.get("forwarder") or {}
+    shards = forwarder.get("shards") or [{"shard_id": "single", "global": forwarder.setdefault("global", {})}]
+    for shard in shards:
+        shard_id = str(shard.get("shard_id") or "single")
+        if cfg.dual_shard_same_gpu:
+            suffix = shard_id.rsplit("-", 1)[-1]
+            service = (
+                f"replay-raw-fanout-{suffix}"
+                if _uses_direct_rolling_cache_ingress(cfg)
+                else f"analysis-forwarder-{suffix}"
+            )
+        else:
+            service = "analysis-forwarder"
+        global_metrics = shard.setdefault("global", {})
+        global_metrics["queue_max_size"] = None
+        global_metrics["queue_capacity_source"] = f"video-analytics-midterm-{service}:Config.Env.FORWARDER_QUEUE_MAX_SIZE"
+        try:
+            values = docker_container_env(f"video-analytics-midterm-{service}")
+            capacity = int(values.get("FORWARDER_QUEUE_MAX_SIZE") or 0)
+            if capacity <= 0:
+                raise ValueError("FORWARDER_QUEUE_MAX_SIZE is absent or nonpositive")
+            global_metrics["queue_max_size"] = capacity
+        except Exception as exc:
+            global_metrics["queue_capacity_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _forwarder_queue_fullness(forwarder: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    shards = forwarder.get("shards") or [{"shard_id": "single", "global": forwarder.get("global") or {}}]
+    result = {}
+    for shard in shards:
+        metrics = shard.get("global") or {}
+        depth = float(metrics.get("queue_depth_instantaneous", metrics.get("queue_depth")) or 0)
+        raw_capacity = metrics.get("queue_max_size")
+        try:
+            capacity = int(raw_capacity)
+        except (TypeError, ValueError):
+            capacity = 0
+        result[str(shard.get("shard_id") or "single")] = {
+            "queue_depth": depth,
+            "queue_max_size": capacity if capacity > 0 else None,
+            "full": depth >= capacity if capacity > 0 else None,
+        }
+    return result
 
 
 def _forwarder_queue_metrics_urls(cfg: PressureConfig) -> dict[str, str]:
@@ -7857,9 +8327,10 @@ def prune_pressure_post_sample_nonplayable_rows(
 def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) -> None:
     since = started_at.isoformat().replace("+00:00", "Z")
     until = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    captures = {}
 
     def capture(container: str, artifact_name: str) -> None:
-        run(
+        completed = run(
             [
                 "docker",
                 "logs",
@@ -7867,12 +8338,14 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
                 since,
                 "--until",
                 until,
+                *(["--timestamps"] if "rolling-cache-sink" in container else []),
                 container,
             ],
             cfg.artifact_dir / artifact_name,
             check=False,
             timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
         )
+        captures[artifact_name] = {"container": container, "returncode": getattr(completed, "returncode", None)}
 
     if cfg.dual_shard_same_gpu:
         write_combined_docker_logs(
@@ -7969,6 +8442,9 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             container_name,
             VIDEO_FILE_SINK_LOG_PATHS[sink_instance],
         )
+    write_json(cfg.artifact_dir / "runtime_log_capture.json", {
+        "since": since, "until": until, "captures": captures,
+    })
 
 
 def rolling_cache_direct_ingress_audit(
@@ -8816,6 +9292,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         key: 0.0 for key in WORKER_CONTAINER_NAMES
     }
     queue_full_samples = 0
+    legacy_queue_full_samples = 0
+    queue_full_samples_by_shard: dict[str, int] = {}
+    queue_capacity_unknown_samples = 0
     transient_queue_samples = 0
     final_forwarder_seen = 0.0
     final_forwarder_forwarded = 0.0
@@ -8933,7 +9412,15 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         if queue_depth_instantaneous > 0 and queue_depth <= 0:
             transient_queue_samples += 1
         if queue_depth_instantaneous >= 2048:
+            legacy_queue_full_samples += 1
+        queue_fullness = _forwarder_queue_fullness(forwarder)
+        if any(row["full"] is None for row in queue_fullness.values()):
+            queue_capacity_unknown_samples += 1
+        if any(row["full"] is True for row in queue_fullness.values()):
             queue_full_samples += 1
+        for shard_id, row in queue_fullness.items():
+            if row["full"] is True:
+                queue_full_samples_by_shard[shard_id] = queue_full_samples_by_shard.get(shard_id, 0) + 1
         max_send_failures = max(max_send_failures, send_failures)
         max_send_failures_delta = max(max_send_failures_delta, send_failures_delta)
         max_forwarder_sources = max(max_forwarder_sources, len(forwarder_sources))
@@ -9156,6 +9643,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "queue_depth_instantaneous": queue_depth_instantaneous,
+                "queue_fullness_by_shard": queue_fullness,
                 "queue_depth_confirmed": queue_depth,
                 "queue_depth_confirmation": forwarder_global.get(
                     "queue_depth_confirmation"
@@ -9237,6 +9725,10 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             max_queue_depth_instantaneous
         ),
         "queue_full_samples": queue_full_samples,
+        "legacy_queue_full_samples": legacy_queue_full_samples,
+        "legacy_queue_full_threshold": 2048,
+        "queue_full_samples_by_shard": queue_full_samples_by_shard,
+        "queue_capacity_unknown_samples": queue_capacity_unknown_samples,
         "transient_forwarder_queue_samples": transient_queue_samples,
         "max_savant_send_failures_total": int(max_send_failures),
         "baseline_savant_send_failures_total": int(baseline_send_failures or 0),
@@ -10469,6 +10961,125 @@ def person_trajectory_completeness_summary(
     }
 
 
+def summarize_rolling_cache_publications(cfg: PressureConfig) -> dict[str, Any]:
+    def read_artifact(name: str) -> dict[str, Any]:
+        try:
+            payload = json.loads((cfg.artifact_dir / name).read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def utc_time(value: Any) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+        except ValueError:
+            return None
+
+    window = read_artifact("pressure_sampling_window.json")
+    start, end = utc_time(window.get("started_at")), utc_time(window.get("ended_at"))
+    if start is None and cfg.pressure_sampling_start_event_ts_ms > 0:
+        start = datetime.fromtimestamp(cfg.pressure_sampling_start_event_ts_ms / 1000.0, timezone.utc)
+    if end is None and cfg.pressure_sampling_end_event_ts_ms > 0:
+        end = datetime.fromtimestamp(cfg.pressure_sampling_end_event_ts_ms / 1000.0, timezone.utc)
+    duration_s = (end - start).total_seconds() if start is not None and end is not None else 0
+    unknown_reasons = []
+    if duration_s <= 0:
+        unknown_reasons.append("sampling_window_unavailable")
+    capture = read_artifact("runtime_log_capture.json")
+    capture_start, capture_end = utc_time(capture.get("since")), utc_time(capture.get("until"))
+    capture_covers_window = bool(
+        duration_s > 0 and capture_start is not None and capture_end is not None
+        and capture_start <= start and capture_end >= end
+    )
+    if not capture_covers_window:
+        unknown_reasons.append("capture_window_unverified")
+    services = ["rolling-cache-sink-a", "rolling-cache-sink-b"] if cfg.dual_shard_same_gpu else ["rolling-cache-sink"]
+    observed_env = read_artifact("rolling_cache_sinks_pressure.json").get("observed_env") or {}
+    by_source = {source: 0 for source in pressure_source_ids(cfg)}
+    service_details = {}
+    seen_publications = set()
+    unparsed = duplicate_lines = other_sources = 0
+    retention_values, segment_seconds_values = [], []
+    for service in services:
+        filename = service.replace("-", "_") + "_logs_since_start.txt"
+        path = cfg.artifact_dir / filename
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        if not path.is_file():
+            unknown_reasons.append(f"{service}:log_file_missing")
+        record = (capture.get("captures") or {}).get(filename) or {}
+        if record.get("returncode") != 0:
+            unknown_reasons.append(f"{service}:capture_failed_or_unverified")
+        timestamps = []
+        for line in text.splitlines():
+            timestamp = utc_time(line.split(" ", 1)[0])
+            if timestamp is not None:
+                timestamps.append(timestamp)
+            if "segment published" not in line:
+                continue
+            source = _extract_log_field(line, "source")
+            segment = _extract_log_field(line, "segment")
+            if timestamp is None or not source or not segment:
+                unparsed += 1
+                continue
+            if duration_s <= 0 or not (start <= timestamp < end):
+                continue
+            if source not in by_source:
+                other_sources += 1
+                continue
+            identity = (source, _extract_log_field(line, "epoch"), _extract_log_field(line, "session"), segment)
+            if identity in seen_publications:
+                duplicate_lines += 1
+                continue
+            seen_publications.add(identity)
+            by_source[source] += 1
+        first, last = min(timestamps, default=None), max(timestamps, default=None)
+        log_spans_window = bool(duration_s > 0 and first is not None and last is not None and first <= start and last >= end)
+        if not log_spans_window:
+            unknown_reasons.append(f"{service}:log_history_does_not_span_window")
+        values = observed_env.get(service) or {}
+        retention = _int_or_none(values.get("ROLLING_CACHE_RETENTION_SECONDS"))
+        segment_seconds = _float_or_none(values.get("ROLLING_CACHE_SEGMENT_SECONDS"))
+        retention_values.append(retention if retention is not None and retention > 0 else None)
+        segment_seconds_values.append(segment_seconds if segment_seconds is not None and segment_seconds > 0 else None)
+        service_details[service] = {
+            "log_path": str(path), "capture_returncode": record.get("returncode"),
+            "earliest_log_at": first.isoformat() if first else None,
+            "latest_log_at": last.isoformat() if last else None,
+            "log_history_spans_window": log_spans_window,
+            "actual_retention_seconds": retention_values[-1],
+            "segment_seconds": segment_seconds_values[-1],
+            "configuration_source": f"rolling_cache_sinks_pressure.json:observed_env.{service}",
+        }
+    if unparsed:
+        unknown_reasons.append("publication_lines_without_qualified_timestamp_or_identity")
+    complete = not unknown_reasons
+    retention = retention_values[0] if retention_values and None not in retention_values and len(set(retention_values)) == 1 else None
+    segment_seconds = segment_seconds_values[0] if segment_seconds_values and None not in segment_seconds_values and len(set(segment_seconds_values)) == 1 else None
+    expected_rate = 60.0 / segment_seconds if segment_seconds else None
+    return {
+        "status": "available" if complete else "unknown", "unknown_reasons": unknown_reasons,
+        "count_basis": "timestamped_segment_published_logs",
+        "window": {"started_at": start.isoformat() if start else None, "ended_at": end.isoformat() if end else None,
+                   "duration_s": duration_s if duration_s > 0 else None, "bounds": "[started_at, ended_at)"},
+        "requested_retention_seconds": pressure_rolling_cache_retention_seconds(cfg),
+        "actual_retention_seconds": retention, "segment_seconds": segment_seconds,
+        "expected_per_source_minute": expected_rate,
+        "published_segments": sum(by_source.values()) if complete else None,
+        "observed_published_segments": sum(by_source.values()),
+        "unparsed_publication_lines": unparsed, "duplicate_publication_lines": duplicate_lines,
+        "other_source_publications_in_window": other_sources, "services": service_details,
+        "by_source": {
+            source: {"observed_published_segments": count,
+                     "published_segments": count if complete else None,
+                     "actual_per_minute": round(count * 60.0 / duration_s, 6) if complete else None,
+                     "expected_per_minute": expected_rate,
+                     "expected_segments_in_window": duration_s / segment_seconds if duration_s > 0 and segment_seconds else None}
+            for source, count in by_source.items()
+        },
+    }
+
+
 def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
     paths = {
         "savant": cfg.artifact_dir / "savant_logs_since_start.txt",
@@ -11312,6 +11923,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         "instances": sink_instances,
         "aggregate": aggregate_video_file_sink_metrics(sink_instances),
     }
+    summary["rolling_cache_publications"] = summarize_rolling_cache_publications(cfg)
     return summary
 
 
@@ -12847,14 +13459,10 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
     )
     run(
         [
-            "docker",
-            "compose",
-            "--env-file",
-            cfg.env_file,
-            "-f",
-            cfg.compose_file,
+            *_compose_base_args(cfg),
             "up",
             "-d",
+            "--no-build",
             "--no-deps",
             "--force-recreate",
             "analysis-forwarder",
@@ -15345,6 +15953,8 @@ def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
             "frames_seen_total": values.get("va_forwarder_frames_seen_total"),
             "frames_forwarded_total": values.get("va_forwarder_frames_forwarded_total"),
             "frames_dropped_total": values.get("va_forwarder_frames_dropped_total"),
+            "frames_stale_dropped_total": values.get("va_forwarder_frames_stale_dropped_total"),
+            "frames_gop_resync_dropped_total": values.get("va_forwarder_frames_gop_resync_dropped_total"),
             "metadata_filtered_total": values.get(
                 "va_forwarder_metadata_filtered_total"
             ),
@@ -15368,6 +15978,7 @@ def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
         "sample_count": len(samples),
         "global": {
             "queue_depth": global_metrics.get("va_forwarder_queue_depth"),
+            "queue_head_age_ms": global_metrics.get("va_forwarder_queue_head_age_ms"),
             "raw_queue_depth": global_metrics.get(
                 "va_forwarder_raw_queue_depth"
             ),
@@ -15873,12 +16484,14 @@ def run(
     check: bool = True,
     timeout_s: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    command_line = "$ " + " ".join(shlex.quote(str(arg)) for arg in cmd)
+    write_text(log_path, command_line + "\n")
     completed = _run_captured_subprocess(
         cmd,
         env=env,
         timeout_s=timeout_s,
     )
-    write_text(log_path, completed.stdout)
+    write_text(log_path, command_line + "\n" + completed.stdout)
     if check and completed.returncode != 0:
         raise RuntimeError(f"command failed rc={completed.returncode}: {' '.join(cmd)}")
     return completed
@@ -15913,5 +16526,34 @@ def _row_json(row: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def cli_main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return main(raw_args)
+    except PressureArgumentError as exc:
+        # Recover only artifact coordinates; the full configuration may be invalid.
+        locator = PressureArgumentParser(add_help=False, allow_abbrev=False)
+        locator.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
+        locator.add_argument("--run-id", default="")
+        try:
+            location, _ = locator.parse_known_args(raw_args)
+        except PressureArgumentError:
+            location, _ = locator.parse_known_args([])
+        run_id = location.run_id or datetime.now(timezone.utc).strftime("pressure60_invalid_%Y%m%dT%H%M%S%fZ")
+        diagnostic = preflight_failure_report(ValueError(exc.reason), section="argument_validation")
+        report = {
+            "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "preflight_failed", "phase": "argument_validation", "exit_code": 2,
+            "reason": diagnostic["reason"], "errors": diagnostic["errors"],
+            "preflight_recovery": {"status": "unchanged"},
+        }
+        try:
+            write_json(location.artifact_root / run_id / "report.json", report)
+        except OSError as write_error:
+            print(f"Could not write argument failure report: {write_error}", file=sys.stderr)
+        print(report["reason"], file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli_main())

@@ -1,0 +1,16 @@
+{
+  "started": {
+    "utc": "2026-10-15T13:47:25.613763+00:00",
+    "kst": "2026-10-15T22:47:25.613763+09:00"
+  },
+  "completed": {
+    "utc": "2026-10-15T13:47:27.545463+00:00",
+    "kst": "2026-10-15T22:47:27.545463+09:00"
+  },
+  "container_count": 30,
+  "containers_unchanged": true,
+  "snapshot_scope": "Identity/image, stable State fields (not health-log samples), mounts, cpuset, Env digest, compose labels, restart count",
+  "stop_reason": null,
+  "before_sha256": "e0974accf02ffa1834c2c978fee559b2924e95ee793862e5d3af75602be5ce16",
+  "after_sha256": "e0974accf02ffa1834c2c978fee559b2924e95ee793862e5d3af75602be5ce16"
+}
