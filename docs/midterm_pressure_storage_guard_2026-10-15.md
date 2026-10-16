@@ -143,9 +143,9 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 ### 推送与审查状态
 
-阶段 0 最新提交为 `417d45827224a5d427b702506cf1072d5d6ffdda`，author/committer 均为 `2026-10-15T22:29:49+09:00`。含用户要求的历史脚本差异、1,225 项视频调度假设及前次修复授权。阶段 1 实现提交为 `fc77792dba21c0a67fbe8e3c446bf7512dd5f21b`，author/committer 均为 `2026-10-15T22:54:15+09:00`。
+阶段 0 最新提交为 `417d45827224a5d427b702506cf1072d5d6ffdda`，author/committer 均为 `2026-10-15T22:29:49+09:00`。含用户要求的历史脚本差异、1,225 项视频调度假设及前次修复授权。阶段 1 初始实现提交为 `fc77792dba21c0a67fbe8e3c446bf7512dd5f21b`，author/committer 均为 `2026-10-15T22:54:15+09:00`；本轮 Opus 阻断项修复提交为 `a16f926ac7f164b3760004faa1d267124c858413`，author/committer 均为 `2026-10-17T00:40:24+09:00`。
 
-阶段 1 的新修复尚未提交；完成 Seoul 时间提交和推送后，在此记录新的 author/committer、推送开始/完成和 `ls-remote` SHA。审查通过前不进入阶段 2。
+本轮修复已按 Seoul 时间提交；推送完成后在此记录推送开始/完成和 `ls-remote` SHA。审查通过前不进入阶段 2。
 
 最初三次推送失败：20:23:31 KST 开始的连接尝试失败；20:26:06 KST 的 HTTP/1.1 尝试超时；20:28:12 KST 经本机代理连接到 GitHub 后认证失败。前两次完成时刻没有精确采集。用户随后说明已在本机登录，核实 `/opt/homebrew/bin/gh` 的 CoisiniYv 认证恢复有效。
 
