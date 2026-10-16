@@ -81,7 +81,7 @@ sink 仅校验其实际读写的 `/media/rolling-cache`，media-worker 校验该
 
 用户提供的审查提交 `516a31b` 指出 B1/B2 和 M1–M5。当前工作树的处理结果如下：
 
-- **B1 已修复：** 规则回读的 `camera_id` 数组改为 `text[]`；新增真实 PostgreSQL 迁移测试，使用非 UUID 的 TEXT camera ID 执行 `insert_pressure_cameras` 并回读规则。无一次性数据库 URL 时该测试明确跳过，不伪造通过。
+- **B1 已修复并实测：** 规则回读的 `camera_id` 数组改为 `text[]`；新增真实 PostgreSQL 迁移测试，使用非 UUID 的 TEXT camera ID 执行 `insert_pressure_cameras` 并回读规则。该测试已在一次性 `postgres:16-alpine` 容器中实际通过（`1 passed in 0.45s`，退出码 0），完整命令、容器 ID 和清理记录见 [postgres-r1](code_review/evidence/rolling_cache_phase1_20261015/postgres-r1/README.md)。没有一次性数据库 URL 的全量 harness 仍按设计跳过该集成测试，不伪造通过。
 - **B2 路线二调整：** 双路压测前仍快照 `savant-a/b`、`replay-raw-fanout-a/b` 及请求拓扑中的附加服务，记录完整 Env、Image、Mounts、Labels 和 Running 状态；压测结束只停止这些 operator 容器并做只读双向比对，差异写入报告并标为 `approved_known_drift`，不重建、不删除、不计入 `restore_errors`。Docker API 精确克隆恢复延期到 B 轮前另立任务，不清理其他 10-13 残留。
 - **M1 已修复：** 每个恢复步骤独立捕获异常，写入 `restore_errors` 后继续；先停双路压测运行时，最终状态在任一恢复差异时为 `failed_restore_verification`，退出码为 1。新增三处注入失败的 `main()` 级测试和 blocked + CPU 隔离路径测试。
 - **M4 路线二调整：** `--preflight-runtime-readback` 在纯预检阶段校验渲染出的 forwarder/Savant/ROI 配置和 profile，不读取旧容器；运行中代码哈希回读保留在真实服务启动后的阶段，纯预检标为 `unknown`。配置不一致写报告并返回 2。
