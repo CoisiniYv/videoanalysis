@@ -32,6 +32,30 @@ def test_preflight_only_cannot_enter_runtime_or_database(tmp_path, monkeypatch):
     assert report["status"] == "preflight_passed"
 
 
+def test_optional_runtime_preflight_readback_failure_is_reported_without_mutation(tmp_path, monkeypatch):
+    module = load()
+    monkeypatch.setattr(module, "perform_storage_preflight", lambda cfg: (
+        {"status": "passed", "services": {}}, {"services": {}}))
+    monkeypatch.setattr(
+        module,
+        "perform_runtime_preflight_readback",
+        lambda cfg, rendered: (_ for _ in ()).throw(
+            module.RuntimeReadbackError("forwarder mismatch", {"status": "failed", "errors": ["forwarder mismatch"]})
+        ),
+    )
+    monkeypatch.setattr(module.psycopg, "connect", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("database opened before runtime preflight")))
+    assert module.main([
+        "--preflight-only", "--preflight-runtime-readback",
+        "--artifact-root", str(tmp_path), "--run-id", "runtime-readback",
+    ]) == 2
+    report = json.loads((tmp_path / "runtime-readback/report.json").read_text())
+    assert report["status"] == "preflight_failed"
+    assert report["exit_code"] == 2
+    assert report["runtime_config_readback"]["status"] == "failed"
+    assert report["preflight_recovery"]["status"] == "unchanged"
+
+
 def test_preflight_abort_invokes_recovery_before_any_mutation(tmp_path, monkeypatch):
     module = load()
     calls = []
@@ -62,7 +86,7 @@ def test_formal_restore_accepts_compose_project_root_and_infra_labels(tmp_path, 
     }}}
     monkeypatch.setattr(module, "inspect_container", lambda name: snapshot)
     monkeypatch.setattr(module, "replace", lambda cfg, **values: SimpleNamespace(**values))
-    restored = module.formal_restore_config(SimpleNamespace())
+    restored = module.formal_restore_config(SimpleNamespace(dual_shard_same_gpu=False))
     assert restored.compose_file == str(base)
     assert restored.env_file == str(infra / "env/midterm.env")
     assert restored.pressure_rolling_cache_host_root == ""

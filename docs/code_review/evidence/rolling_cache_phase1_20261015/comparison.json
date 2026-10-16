@@ -3,7 +3,7 @@
   "authorized_repair_round": 1,
   "authorization": "User authorized stage-1 harness/preflight repairs up to three repair rounds and requires the exact failure set to be a subset of baseline 98d388c before review.",
   "current_harness_returncode": 1,
-  "generated_at_kst": "2026-10-15 22:52:40+09:00",
+  "generated_at_kst": "2026-10-17 00:18:18+09:00",
   "baseline_counts": {
     "tests": 1928,
     "failures": 15,
@@ -12,20 +12,20 @@
     "passed": 1839
   },
   "current_counts": {
-    "tests": 2101,
+    "tests": 2115,
     "failures": 11,
     "errors": 1,
-    "skipped": 73,
-    "passed": 2016
+    "skipped": 74,
+    "passed": 2029
   },
-  "added_test_cases": 173,
+  "added_test_cases": 187,
   "new_tests_selection": "Exact (classname, name) set difference between current-junit.xml and baseline-junit.xml, run as pytest nodeids with DATABASE_URL and VIDEO_ANALYTICS_DATABASE_URL removed.",
   "new_tests_counts": {
-    "tests": 173,
+    "tests": 187,
     "failures": 0,
     "errors": 0,
-    "skipped": 0,
-    "passed": 173
+    "skipped": 1,
+    "passed": 186
   },
   "new_tests_returncode": 0,
   "added_failures_or_errors": [],
@@ -39,22 +39,25 @@
   "source_sha256": {
     "harness/tests/test_media_worker_completion_wake.py": "312f21c7202c811966d67b347458ad14cfec0c00901a0562a37fe039cae6d788",
     "harness/tests/test_midterm_pressure60_baseline_pollution.py": "facbcdbd20e23b2bfd2cfd91a154a76dfd00cc45015f030caf89ee4f2a3cfd41",
-    "harness/tests/test_midterm_pressure60_behavior_rules.py": "9f77e12fcf36f262e607c952fb8211178f4b03ec293f0f7ea34587509974fff8",
-    "harness/tests/test_midterm_pressure60_compose_guard.py": "f9ba318515073ec5f4c3a04a17540262be5ea6a53738fcfac9147b053416e173",
+    "harness/tests/test_midterm_pressure60_behavior_rules.py": "09d87058be4a6fd10f170edaf14539b845734c716c9ef0f9eb696a887a4ba197",
+    "harness/tests/test_midterm_pressure60_compose_guard.py": "be19f929666a666676767572595f28ea8634a82059ed3bccab5a0c8b4e2f3778",
     "harness/tests/test_midterm_pressure60_media_worker_contract.py": "5b37dbd289bd311885271e9aecb54fe6b67992ce0a8c6dda7dc99a5d7d06fc16",
+    "harness/tests/test_midterm_pressure60_postgres.py": "534c4210c57047351fea4e4c71812c6653ff175a5e767f42a1773d12f7430212",
     "harness/tests/test_midterm_pressure60_preflight_cli.py": "4c2f03b415f6690cbfd153df76b196275a7eed6dfd094fda7f2303c98e614dd8",
-    "harness/tests/test_midterm_pressure60_preflight_flow.py": "1ee99ebaf0c90406e0d6601cc1213c495267f4b82f002db56776e48cd1cc6f95",
+    "harness/tests/test_midterm_pressure60_preflight_flow.py": "f60a82dc563a2b9a04dace1ed9633f0391c2bc6bfbd57c4e63b1a0b33da30fec",
     "harness/tests/test_midterm_pressure60_publication_rates.py": "3d7cfd50ae22f885fbdbf24bd646dec604aa4d23cba3e0be8edb45f2318d88c5",
     "harness/tests/test_midterm_pressure60_queue_statistics.py": "4dae3a167323405098138d33832fe7a3a9a27a3b81c2eb821d3463f8d5354379",
-    "harness/tests/test_midterm_pressure60_runtime_readback.py": "8c4ba1cedc7fe3debb4e8f7cd9a889a9a4f1cefbcaa72fdf01e25ee92b3b4027",
+    "harness/tests/test_midterm_pressure60_restore_paths.py": "8eb8d3a9b936a6b8deab34d5760fbcb73d4648dc17756214a1bd43d725b4cf9b",
+    "harness/tests/test_midterm_pressure60_runtime_readback.py": "1e9d7dfb8c14b61fd73195b409309b7791ce9cb9fd92c4c3588aa2ab627cabc9",
     "harness/tests/test_midterm_pressure60_script.py": "2efb1e8b118fa6534dd7e1ae4d843b52ea46826b6c2cee330c4d6399b7077f2e",
+    "harness/tests/test_midterm_pressure60_single_sink_restore.py": "3f642ab2421a47b75a8a93d19b85f387411334ac7508369376dd44a8453ae108",
     "harness/tests/test_midterm_pressure60_storage_guard.py": "f79b88a144a979a47eedcd12477c44d4452079a48daa37bc6e655d9448016e73",
-    "harness/tests/test_midterm_pressure60_storage_preflight.py": "13f0412b451bcad1a148e215a0f0b665f6b8406a94d904814b752f36311a7a3d",
-    "scripts/runtime/pressure_baseline_guard.py": "a2161310f0454e0e6fab81506b77a9a46e316f0c7d7773ef61046e5ee123968a",
-    "scripts/runtime/pressure_runtime_readback.py": "d4669ca4a90bfc69519144c823e97a135c95dae535c7a83a41b675922c5cec52",
+    "harness/tests/test_midterm_pressure60_storage_preflight.py": "abb4c17c562cf9b6c0e8ffcc9141fa7b537b88a1ab48512fb451489f31e03a16",
+    "scripts/runtime/pressure_baseline_guard.py": "2f80d5d068ab734326d7da1ddb047b108fb55564d711e6ed6a39e980fb941aef",
+    "scripts/runtime/pressure_runtime_readback.py": "6946b69da1dd7e682583e81e4aa30ff03e8ad5a712b9be2ad3b991a4a5c784d2",
     "scripts/runtime/pressure_storage_guard.py": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27",
-    "scripts/runtime/rolling_cache_storage_preflight.py": "103e9a13a629f743e306467827d8be86b8fdfc5014c832145c084a9d9fa85f32",
-    "scripts/runtime/run_midterm_pressure60.py": "1bfd98d78e7bec7e6e1d2430d4f886fb0c9e3df85fb23508efb74b2821630de5"
+    "scripts/runtime/rolling_cache_storage_preflight.py": "9f82db15865e8e1eb9649fe6dbb3f47804b1feb51f4e168ba8020ee029f1d5a4",
+    "scripts/runtime/run_midterm_pressure60.py": "49a5470c347b0154c6d5dc683117add8b9065dee45e5153b1099c76d9e221908"
   },
   "exact_base_config": {
     "command": "docker compose -f infra/docker-compose.midterm.yml config",

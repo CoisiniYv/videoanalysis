@@ -130,8 +130,22 @@ def rolling_cache_storage_preflight(
         completed = run_command(command)
         report["compose"]["returncode"] = completed.returncode
         rendered = _json_result(completed, "docker compose config")
-        sources = parse_compose_cache_sources(rendered, sink_services)
+        sources = (
+            parse_compose_cache_sources(rendered, sink_services)
+            if bool(getattr(cfg, "rolling_cache_evidence", False))
+            else {}
+        )
         report["compose"]["services"] = _config_summary(rendered, sources)
+        if not bool(getattr(cfg, "rolling_cache_evidence", False)):
+            # Non-rolling pressure modes do not create or consume the cache.
+            # Keep the rendered Compose evidence, but do not impose a cache
+            # disk/space gate or probe an unrelated input stream.
+            report.update(
+                status="not_applicable",
+                reason="rolling_cache_evidence_disabled",
+                errors=[],
+            )
+            return report, rendered
         input_uri = str(cfg.rtsp_republish_input_uri or cfg.rtsp_uri or "").strip()
         if not input_uri:
             raise StoragePreflightError("input bitrate source is unavailable")
@@ -141,13 +155,25 @@ def rolling_cache_storage_preflight(
         completed = run_command(probe_command)
         report["input"]["returncode"] = completed.returncode
         probe = _json_result(completed, "ffprobe bitrate probe")
-        byte_rate = ffprobe_bytes_per_second(probe)
+        try:
+            byte_rate = ffprobe_bytes_per_second(probe)
+        except StoragePreflightError:
+            fallback = float(getattr(cfg, "rolling_cache_bytes_per_second", 0.0) or 0.0)
+            if not math.isfinite(fallback) or fallback <= 0:
+                raise
+            byte_rate = fallback
+            report["input"]["bitrate_source"] = "cli_fallback:--rolling-cache-bytes-per-second"
         report["input"]["bytes_per_second_per_camera"] = byte_rate
         try:
             format_rate = float((probe.get("format") or {}).get("bit_rate"))
         except (TypeError, ValueError):
             format_rate = 0.0
-        report["input"]["bitrate_source"] = "format.bit_rate" if math.isfinite(format_rate) and format_rate > 0 else "sum(streams[].bit_rate)"
+        if "bitrate_source" not in report["input"]:
+            report["input"]["bitrate_source"] = (
+                "format.bit_rate"
+                if math.isfinite(format_rate) and format_rate > 0
+                else "sum(streams[].bit_rate)"
+            )
         retention = retention_s if retention_s is not None else (
             int(cfg.pressure_rolling_cache_retention_s) if cfg.pressure_rolling_cache_retention_s > 0
             else max(900, int(cfg.duration_s) + int(cfg.drain_s) + 120)

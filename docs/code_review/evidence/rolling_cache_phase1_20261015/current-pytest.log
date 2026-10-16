@@ -4,30 +4,30 @@
 ...................................................................F.... [ 13%]
 ....................s...............................................F... [ 17%]
 .................................................................sss.... [ 20%]
-................ssss.................................................... [ 24%]
+................ssss.................................................... [ 23%]
 ...............sss..sssss............................................... [ 27%]
 ........................................................................ [ 30%]
 ........................................................................ [ 34%]
 ........................................................................ [ 37%]
-.........................................ssssssss....................... [ 41%]
+.........................................ssssssss....................... [ 40%]
 ........................................................................ [ 44%]
-.......................................................sssssssssssssssss [ 48%]
+.......................................................sssssssssssssssss [ 47%]
 s..........................ssssssss...........sssssss................... [ 51%]
 .................................s...................................... [ 54%]
-...........................................ssss......................... [ 58%]
+...........................................ssss......................... [ 57%]
 ....................................................F.....F........F.... [ 61%]
-........F............................................................... [ 65%]
-........................................................................ [ 68%]
-........................................................................ [ 72%]
-..........................F............................................. [ 75%]
+........F............................................................... [ 64%]
+..................s..................................................... [ 68%]
+........................................................................ [ 71%]
+.....................................F.................................. [ 74%]
 ........................................................................ [ 78%]
-........................................................................ [ 82%]
-..................................................................F..... [ 85%]
-........................................................................ [ 89%]
-.......................................................................F [ 92%]
-F....................................................................... [ 96%]
-................................................................ssssssss [ 99%]
-sss.........                                                             [100%]
+........................................................................ [ 81%]
+........................................................................ [ 85%]
+........F............................................................... [ 88%]
+........................................................................ [ 91%]
+.............FF......................................................... [ 95%]
+........................................................................ [ 98%]
+......sssssssssss.........                                               [100%]
 ==================================== ERRORS ====================================
 ______ ERROR collecting harness/tests/test_trajectory_thumbnail_cache.py _______
 ImportError while importing test module '/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/harness/tests/test_trajectory_thumbnail_cache.py'.
@@ -74,7 +74,7 @@ E            +  where {'test_active_epoch_scan_uses_incremental_children_and_ign
 harness/tests/test_clip_media_legacy_behavior_baseline.py:90: AssertionError
 _________ test_load_gallery_normalizes_vectors_and_preserves_identity __________
 
-tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_load_gallery_normalizes_v0')
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-131/test_load_gallery_normalizes_v0')
 
     def test_load_gallery_normalizes_vectors_and_preserves_identity(tmp_path: Path) -> None:
         vector = [0.0] * 512
@@ -259,7 +259,7 @@ E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/khonsu/.
 ../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/pathlib.py:1013: FileNotFoundError
 ___ test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata ____
 
-tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_rolling_cache_cleanup_rem0')
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-131/test_rolling_cache_cleanup_rem0')
 
     def test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata(
         tmp_path: Path,
@@ -305,12 +305,12 @@ tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/p
 
 harness/tests/test_midterm_pressure60_script.py:3109: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-scripts/runtime/run_midterm_pressure60.py:13283: in remove_pressure_rolling_cache_artifacts
+scripts/runtime/run_midterm_pressure60.py:13747: in remove_pressure_rolling_cache_artifacts
     root = pressure_rolling_cache_root_host(cfg)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-scripts/runtime/run_midterm_pressure60.py:12870: in pressure_rolling_cache_root_host
+scripts/runtime/run_midterm_pressure60.py:13334: in pressure_rolling_cache_root_host
     resolved = resolve_container_bind_source(
-scripts/runtime/run_midterm_pressure60.py:13053: in resolve_container_bind_source
+scripts/runtime/run_midterm_pressure60.py:13517: in resolve_container_bind_source
     completed = subprocess.run(
 ../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py:548: in run
     with Popen(*popenargs, **kwargs) as process:
@@ -497,7 +497,7 @@ E                   FileNotFoundError: [Errno 2] No such file or directory: 'doc
 ../../../../.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py:1955: FileNotFoundError
 ______________ test_update_appendix_text_replaces_existing_block _______________
 
-tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_update_appendix_text_repl0')
+tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-131/test_update_appendix_text_repl0')
 
     def test_update_appendix_text_replaces_existing_block(tmp_path: Path) -> None:
         spec_text = """# Spec
@@ -522,7 +522,7 @@ tmp_path = PosixPath('/private/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/p
 E       AssertionError: assert 'old' not in '# Spec\n\n#....json\n```\n'
 E         
 E         'old' is contained here:
-E           vate/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-95/test_update_appendix_text_repl0/phase2.json
+E           vate/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-131/test_update_appendix_text_repl0/phase2.json
 E         ?           +++
 E           ```
 
@@ -840,7 +840,7 @@ services/api/app/services/runtime_apply.py:482: RuntimeApplyBlockedError
 
 The above exception was the direct cause of the following exception:
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x130734440>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x127544da0>
 
     def test_restart_single_runtime_blocks_when_evidence_active(monkeypatch) -> None:
         fake = FakeDockerClient()
@@ -888,7 +888,7 @@ services/api/app/services/runtime_control.py:267: RuntimeControlBlockedError
 
 During handling of the above exception, another exception occurred:
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x130734440>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x127544da0>
 
     def test_restart_single_runtime_blocks_when_evidence_active(monkeypatch) -> None:
         fake = FakeDockerClient()
@@ -936,4 +936,4 @@ FAILED harness/tests/test_phase2_operating_point_appendix.py::test_update_append
 FAILED harness/tests/test_runtime_control_service.py::test_stop_dual_runtime_only_stops_dual_extension_containers
 FAILED harness/tests/test_runtime_control_service.py::test_restart_single_runtime_blocks_when_evidence_active
 ERROR harness/tests/test_trajectory_thumbnail_cache.py
-11 failed, 2016 passed, 73 skipped, 1 warning, 1 error in 22.98s
+11 failed, 2029 passed, 74 skipped, 1 warning, 1 error in 22.68s

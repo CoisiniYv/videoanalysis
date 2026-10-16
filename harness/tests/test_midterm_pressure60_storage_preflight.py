@@ -214,6 +214,36 @@ def test_unknown_bitrate_is_failure(tmp_path):
         module.rolling_cache_storage_preflight(_cfg(tmp_path), compose_base_args=_base(tmp_path), run_command=run, inspector=_inspector)
 
 
+def test_unknown_bitrate_can_use_explicit_cli_fallback(tmp_path):
+    module = _load()
+    runner = _runner([], _config())
+
+    def run(command):
+        if command[0] == "ffprobe":
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+        return runner(command)
+
+    report, _ = module.rolling_cache_storage_preflight(
+        _cfg(tmp_path, rolling_cache_bytes_per_second=100),
+        compose_base_args=_base(tmp_path), run_command=run, inspector=_inspector,
+    )
+    assert report["input"]["bytes_per_second_per_camera"] == 100
+    assert report["input"]["bitrate_source"] == "cli_fallback:--rolling-cache-bytes-per-second"
+
+
+def test_non_rolling_mode_records_compose_without_storage_gate(tmp_path):
+    module = _load()
+    commands = []
+    report, rendered = module.rolling_cache_storage_preflight(
+        _cfg(tmp_path, rolling_cache_evidence=False),
+        compose_base_args=_base(tmp_path), run_command=_runner(commands, _config()), inspector=_inspector,
+    )
+    assert report["status"] == "not_applicable"
+    assert report["reason"] == "rolling_cache_evidence_disabled"
+    assert len(commands) == 1
+    assert rendered["services"]
+
+
 def test_failed_rotational_guard_keeps_compose_and_budget_evidence(tmp_path):
     module = _load()
     def inspect(path):

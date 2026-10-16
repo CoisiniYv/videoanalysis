@@ -1,10 +1,10 @@
 {
   "counts": {
-    "tests": 2101,
+    "tests": 2115,
     "failures": 11,
     "errors": 1,
-    "skipped": 73,
-    "passed": 2016
+    "skipped": 74,
+    "passed": 2029
   },
   "failures_and_errors": [
     {
@@ -20,7 +20,7 @@
     {
       "nodeid": "harness/tests/test_clip_media_legacy_behavior_baseline.py::test_required_characterization_scenarios_are_named_and_executable",
       "kind": "failure",
-      "message": "AssertionError: {'name': 'late_annotation', 'nodeid': 'harness/tests/test_media_worker_perf_safety.py::test_late_annotation_retry_uses_unbounded_stream_id_lookback', 'outcome': 'annotation_retry'}"
+      "message": "AssertionError: {'name': 'late_annotation', 'nodeid': 'harness/tests/test_media_worker_perf_safety.py::test_late_annotation_retry_uses_unbounded_stream_id_lookback', 'outcome': 'annotation_retry'}\nassert 'test_late_annotation_retry_uses_unbounded_stream_id_lookback' in {'test_active_epoch_scan_uses_incremental_children_and_ignores_old_epoch', 'test_db_index_failure_persists_in_memory_a...dex_io_gate_serializes_expanded_row_writes_and_reports_wait', 'test_finalizer_log_formats_extended_remux_metrics', ...}\n +  where {'test_active_epoch_scan_uses_incremental_children_and_ignores_old_epoch', 'test_db_index_failure_persists_in_memory_a...dex_io_gate_serializes_expanded_row_writes_and_reports_wait', 'test_finalizer_log_formats_extended_remux_metrics', ...} = _test_names((PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject') / 'harness/tests/test_media_worker_perf_safety.py'))"
     },
     {
       "nodeid": "harness/tests/test_compare_adaface_roi_transport.py::test_load_gallery_normalizes_vectors_and_preserves_identity",
@@ -30,12 +30,12 @@
     {
       "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_midterm_deployment_files_exist",
       "kind": "failure",
-      "message": "AssertionError: assert False"
+      "message": "AssertionError: assert False\n +  where False = exists()\n +    where exists = PosixPath('/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject/CLAUDE.md').exists"
     },
     {
       "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_runtime_doctor_is_midterm_named",
       "kind": "failure",
-      "message": "AssertionError: assert ['capture_dep...file.sh', ...] == ['doctor_midt...trix.sh', ...]"
+      "message": "AssertionError: assert ['capture_dep...file.sh', ...] == ['doctor_midt...trix.sh', ...]\n  \n  At index 0 diff: 'capture_deployment_baseline.sh' != 'doctor_midterm.sh'\n  Left contains 2 more items, first extra item: 'set_operator_credentials.sh'\n  Use -v to get more diff"
     },
     {
       "nodeid": "harness/tests/test_midterm_deployment_contract.py::test_midterm_source_id_and_camera_config_are_neutral",
@@ -55,7 +55,7 @@
     {
       "nodeid": "harness/tests/test_phase2_operating_point_appendix.py::test_update_appendix_text_replaces_existing_block",
       "kind": "failure",
-      "message": "AssertionError: assert 'old' not in '# Spec\\n\\n#....json\\n```\\n'"
+      "message": "AssertionError: assert 'old' not in '# Spec\\n\\n#....json\\n```\\n'\n  \n  'old' is contained here:\n    vate/var/folders/tm/p5cbz9yd4xn7wjtmdl9167vr0000gn/T/pytest-of-khonsu/pytest-130/test_update_appendix_text_repl0/phase2.json\n  ?           +++\n    ```"
     },
     {
       "nodeid": "harness/tests/test_runtime_control_service.py::test_stop_dual_runtime_only_stops_dual_extension_containers",
@@ -65,17 +65,14 @@
     {
       "nodeid": "harness/tests/test_runtime_control_service.py::test_restart_single_runtime_blocks_when_evidence_active",
       "kind": "failure",
-      "message": "AssertionError: assert 503 == 409"
+      "message": "AssertionError: assert 503 == 409\n +  where 503 = RuntimeControlBlockedError('runtime evidence guard unavailable; refusing to interrupt evidence workers').status_code"
     }
   ],
   "interpreter": "/tmp/pressure60-harness-env/bin/python",
   "dependency_lock": "/tmp/pressure60-harness-lock.txt",
-  "code_sha": "authorized-repair-round1-working-tree",
+  "code_sha": "authorized-repair-round1-working-tree-20261016",
   "junit": "/tmp/pressure60-final.xml",
   "cwd": "/Users/khonsu/.codex/worktrees/pressure60-phase0/SavantProject",
   "command": "env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL /tmp/pressure60-harness-env/bin/python -m pytest -q harness/tests --continue-on-collection-errors --junitxml=/tmp/pressure60-final.xml",
-  "generated_at_kst": "2026-10-15T22:48:22.981649+09:00",
-  "raw_suite_timestamps": [
-    "2026-10-15T21:46:14.101612+08:00"
-  ]
+  "generated_at_kst": "2026-10-17T00:16:56.671881+09:00"
 }

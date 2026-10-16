@@ -1,0 +1,7 @@
+{
+  "container_count": 30,
+  "containers_unchanged": true,
+  "before_count": 30,
+  "after_count": 30,
+  "comparison_scope": "Identity/image, stable State fields (not health-log samples), mounts, cpuset, Env digest, compose labels, restart count"
+}

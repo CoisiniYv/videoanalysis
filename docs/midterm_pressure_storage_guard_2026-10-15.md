@@ -4,7 +4,7 @@
 
 ## 结论与授权
 
-**阶段 1 修复与重验达到交审标准并已推送，待 Opus 审查。** 本次授权后的第 1 轮全量 harness 为 2016 passed / 11 failed / 73 skipped / 1 collection error，失败名单为基线 `98d388c` 的子集，无新增失败或收集错误；实机纯预检正向返回 0、反向返回 2，30 个正式容器前后一致。前次 17 个失败的停止记录和原始证据保留，不以旧轮 11 个失败代替本次重验。未进入阶段 2。
+**阶段 1 修复与重验达到交审标准，当前修复待提交推送后交 Opus 审查。** 最新授权后的第 1 轮全量 harness 为 2029 passed / 11 failed / 74 skipped / 1 collection error，失败名单为基线 `98d388c` 的子集，无新增失败或收集错误；新增集合 187 项为 186 passed / 1 skipped / 0 failed / 0 error。当前源码在真实辅助容器上的只读预检正向返回 0、反向返回 2，30 个正式容器前后一致。前次 17 个失败的停止记录和原始证据保留，不以旧轮 11 个失败代替本次重验。未进入阶段 2。
 
 阶段 1 基于阶段 0 最新提交 `417d45827224a5d427b702506cf1072d5d6ffdda`，分支为 `codex/rolling-cache-storage-guard-20261015`；提交和审查结果见下节记录。代码只修改 `scripts/runtime/` 和 `harness/`，另补本开发文档和规格状态。正式服务、正式 checkout、已有数据和镜像未修改。
 
@@ -77,9 +77,22 @@ sink 仅校验其实际读写的 `/media/rolling-cache`，media-worker 校验该
 
 污染始终 `blocking=false`。存在发现时 `severity=red`，同时生成红色 HTML 警示 Markdown 和终端红字；不修改正式源、保留期、规则或 8090 配置。
 
+### Opus 阻断项修复记录
+
+用户提供的审查提交 `516a31b` 指出 B1/B2 和 M1–M5。当前工作树的处理结果如下：
+
+- **B1 已修复：** 规则回读的 `camera_id` 数组改为 `text[]`；新增真实 PostgreSQL 迁移测试，使用非 UUID 的 TEXT camera ID 执行 `insert_pressure_cameras` 并回读规则。无一次性数据库 URL 时该测试明确跳过，不伪造通过。
+- **B2 已修复：** 双路压测重建前快照 `savant-a/b`、`replay-raw-fanout-a/b`，以及请求拓扑中的 `adaface-roi-worker`/decoupled 附加服务，记录完整 Env、Image、Mounts、Labels 和 Running 状态。恢复固定使用正式 base、`operator-dual-runtime.override.yml`、storage override 和快照 Env；原停止服务用 `--no-start`，恢复后对 Env、镜像、挂载、标签和运行状态做双向比对。不存在的可选服务只核验不存在，不清理其他 10-13 残留。
+- **M1 已修复：** 每个恢复步骤独立捕获异常，写入 `restore_errors` 后继续；先停双路压测运行时，最终状态在任一恢复差异时为 `failed_restore_verification`，退出码为 1。新增三处注入失败的 `main()` 级测试和 blocked + CPU 隔离路径测试。
+- **M4 已修复：** `--preflight-runtime-readback` 在纯预检阶段读取实际 forwarder/Savant 环境和代码哈希；规则注册表默认值在任何服务或数据库变更前解析；配置不一致写报告并返回 2。null-sink 不回读未重建的 Savant。
+- **M2 残留边界：** 阶段 2 A 轮使用双路滚动缓存、`force_runtime_restart=true`，正常恢复顺序会先恢复双 sink 再恢复 CPU 隔离，两个缓存端点共同使用正式 storage override。blocked-active-evidence 的提前退出路径不在阶段 2 参数范围，仍保留“CPU 隔离恢复可能单独重建 media-worker”的残留风险，已由测试覆盖并记录，不在本轮扩大设计范围。
+- **M3 残留边界：** 单路 rolling-cache-sink 不属于阶段 2；原本不存在的容器现在按不存在处理并删除意外残留后核验，单路路径仍不作为阶段 2 证据。
+- **M5 已按阶段 2 范围修复：** 非 rolling-cache 模式只记录 Compose、不做缓存盘门控；ffprobe 无码率时可用 `--rolling-cache-bytes-per-second` 明确回退并标记来源；其余只读运行时回读按实际重建服务选择。阶段 2 A 轮仍使用固定文件输入，不依赖该回退。
+- **次要问题：** 冷却统计已加入 `fall`、`crowd_gathering`、`chasing`；污染源判定统一复用共享前缀函数；MPS 停止摘要改为停止后读取。其余非阶段 2 的遗留项保留为风险，不改变正式服务状态。
+
 ## 验证与证据
 
-新增测试先写失败用例，再实现对应路径；本次新增参数报告四项和调度契约五项。定向验证分别为 74 passed（completion/pollution/Compose/调度契约）、25 passed（CLI/预检流/既有非法参数）。最终新增集合以本轮两份 JUnit 差集确定，共 **173 项，173 passed / 0 failed / 0 skipped / 0 error**，单跑退出码 0，来源为同目录 `new-tests-summary.json` / `new-tests-junit.xml`。同一个冻结解释器和依赖、均移除数据库环境变量，运行全量 harness：
+新增测试先写失败用例，再实现对应路径；本次新增参数报告、B1/B2/M1–M5 和调度契约覆盖。最终新增集合以本轮两份 JUnit 差集确定，共 **187 项，186 passed / 1 skipped / 0 failed / 0 error**，单跑退出码 0；跳过项是未配置一次性 PostgreSQL URL 的真实数据库测试，来源为同目录 `new-tests-summary.json` / `new-tests-junit.xml`。同一个冻结解释器和依赖、均移除数据库环境变量，运行全量 harness：
 
 ```sh
 env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
@@ -89,13 +102,13 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 | 口径 | 基线 98d388c | 阶段 1 | 10-12 运行参考 |
 |---|---:|---:|---|
-| passed | 1839 | 2016 | 不适用，非同套 harness |
+| passed | 1839 | 2029 | 不适用，非同套 harness |
 | failed | 15 | 11 | 不适用 |
-| skipped | 73 | 73 | 不适用 |
+| skipped | 73 | 74 | 不适用 |
 | collection error | 1 | 1 | 不适用 |
 | 新失败/新收集错误 | — | 0 / 0 | 不适用 |
 
-来源：[验证比较与源码摘要](code_review/evidence/rolling_cache_phase1_20261015/comparison.json)、同目录 JUnit 和依赖锁；[完整失败集合及差异](code_review/rolling_cache_phase1_failure_comparison_2026-10-15.md)。本次最新摘要保留原始 suite 时间并换算 KST。基线原有四个 sink/mock 失败仍消失；前次新增六项现均通过，当前失败和 collection error 名单逐项为基线子集。
+来源：[验证比较与源码摘要](code_review/evidence/rolling_cache_phase1_20261015/comparison.json)、同目录 JUnit 和依赖锁；[完整失败集合及差异](code_review/rolling_cache_phase1_failure_comparison_2026-10-15.md)。本次最新摘要保留原始 suite 时间并换算 KST。基线原有四个 sink/mock 失败仍消失；本轮新增集合全部无失败，当前失败和 collection error 名单逐项为基线子集。
 
 历史停止轮：22:32:12–22:33:23 KST 得到 2001 passed / 17 failed / 73 skipped / 1 error，其中四项 completion-wake 为配置字段访问回归、两项污染检测为 mock 签名不兼容。最新授权后已按上述不同原因分别修复；原始堆栈、XML、日志和当时对照文档保留于 [修复前历史证据](code_review/evidence/rolling_cache_phase1_20261015/history/harness-before-authorized-repair/)。该历史轮不计为最新三轮授权的修复后重验。
 
@@ -126,11 +139,13 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 **最新授权后第 1 轮交审重验：通过。** `2026-10-15T22:47:25.613763+09:00` 至 `22:47:27.545463+09:00`，最新完整源码在独立 `/tmp/pressure60-phase1-preflight-20261015-r2` 运行，复用既有输入。NVMe 返回 0，机械盘返回 2，两次报告均含原因和退出码。30 个正式容器前后一致。全部原始输出、报告、退出码及精确源码哈希见 [最新实机证据](code_review/evidence/rolling_cache_phase1_20261015/preflight-r2/README.md)。目录 r2 只延续历史命名，不代表本次授权已消耗两轮。
 
+**当前工作树真实辅助容器复验：通过。** `2026-10-17T00:23:26.545690+09:00` 至 `00:23:28.662632+09:00`，当前源码在 `uos157` 的独立 `/tmp/pressure60-phase1-preflight-20261016` 运行。正常 storage override 返回 0 并识别两个 NVMe 缓存路径；省略 storage override 返回 2 并识别 `/data` 的 rotational=true。两次均写报告，stdout/stderr 为空；前后 30 个正式容器完全一致。完整命令、报告、原始输出、容器比较和当前源码哈希见 [当前实机证据](code_review/evidence/rolling_cache_phase1_20261015/preflight-r3/README.md)。
+
 ### 推送与审查状态
 
 阶段 0 最新提交为 `417d45827224a5d427b702506cf1072d5d6ffdda`，author/committer 均为 `2026-10-15T22:29:49+09:00`。含用户要求的历史脚本差异、1,225 项视频调度假设及前次修复授权。阶段 1 实现提交为 `fc77792dba21c0a67fbe8e3c446bf7512dd5f21b`，author/committer 均为 `2026-10-15T22:54:15+09:00`。
 
-阶段 1 推送开始 `2026-10-15T22:54:16+09:00`，客户端成功完成确认于 `22:54:32+09:00`；`ls-remote` 核验该分支远端 SHA 为 `fc77792dba21c0a67fbe8e3c446bf7512dd5f21b`。完成确认时间不是精确的 GitHub 接收时间。待审代码固定为此提交；审查通过前不进入阶段 2。
+阶段 1 的新修复尚未提交；完成 Seoul 时间提交和推送后，在此记录新的 author/committer、推送开始/完成和 `ls-remote` SHA。审查通过前不进入阶段 2。
 
 最初三次推送失败：20:23:31 KST 开始的连接尝试失败；20:26:06 KST 的 HTTP/1.1 尝试超时；20:28:12 KST 经本机代理连接到 GitHub 后认证失败。前两次完成时刻没有精确采集。用户随后说明已在本机登录，核实 `/opt/homebrew/bin/gh` 的 CoisiniYv 认证恢复有效。
 

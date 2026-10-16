@@ -7,7 +7,13 @@ from typing import Any, Mapping, Sequence
 
 
 def is_pressure_source(value: str) -> bool:
-    return value.startswith(("pressure60", "pressure40", "pressure_"))
+    return value.startswith((
+        "pressure60",
+        "pressure40",
+        "pressure_",
+        "forwarder60_null_",
+        "rc",
+    ))
 
 
 def is_pressure_camera(camera: Mapping[str, Any]) -> bool:

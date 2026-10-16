@@ -134,6 +134,11 @@ def test_behavior_rules_cli_preserves_requested_rules():
     ]).behavior_rules == ("fall", "crowd_gathering", "chasing")
 
 
+def test_pressure_rule_readback_uses_text_array_for_camera_ids():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "WHERE camera_id=ANY(%s::text[]) AND enabled=true" in source
+
+
 @pytest.mark.parametrize("value", ["running", "fall,", "fall,fall", "behavior.fall"])
 def test_behavior_rules_cli_rejects_unsupported_or_ambiguous_lists(value):
     with pytest.raises(SystemExit):

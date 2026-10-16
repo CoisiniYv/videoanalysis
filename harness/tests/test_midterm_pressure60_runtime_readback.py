@@ -100,6 +100,19 @@ def test_single_mode_reads_single_forwarder_and_savant(tmp_path):
     assert set(report["savant"]) == {"savant"}
 
 
+def test_forwarder_only_mode_skips_savant_readback(tmp_path):
+    module = _load()
+    expected, commands, observed, env, run = _setup(tmp_path, ("analysis-forwarder",))
+    report = module.collect_runtime_readback(
+        _cfg(rolling_cache_evidence=False, dual_shard_same_gpu=False, forwarder_null_sink=True),
+        expected_forwarder_env=expected, docker_env=env, run_command=run,
+        source_root=tmp_path, read_savant=False,
+    )
+    assert report["status"] == "passed"
+    assert report["savant"] == {}
+    assert report["savant_readback"] == "not_applicable_savant_not_rebuilt"
+
+
 def test_forwarder_value_mismatch_fails_and_preserves_observed(tmp_path):
     module = _load()
     def env(name):

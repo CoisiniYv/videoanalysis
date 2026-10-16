@@ -12,18 +12,18 @@
 
 | 指标 | 基线 `98d388c` | 当前保存的一轮 | 来源 |
 |---|---:|---:|---|
-| JUnit tests（含 collection error） | 1,928 | 2,101 | 两份 summary 的 `counts.tests` |
-| passed | 1,839 | 2,016 | `counts.passed` |
+| JUnit tests（含 collection error） | 1,928 | 2,115 | 两份 summary 的 `counts.tests` |
+| passed | 1,839 | 2,029 | `counts.passed` |
 | failures | 15 | 11 | `counts.failures` |
 | collection errors | 1 | 1 | `counts.errors` 与 JUnit error 内容 |
-| skipped | 73 | 73 | `counts.skipped` |
+| skipped | 73 | 74 | `counts.skipped` |
 | suite 开始时间（KST） | 2026-10-15 20:47:41.943159 | 2026-10-15 22:46:14.101612 | `raw_suite_timestamps` 从 UTC+08 转为 UTC+09 |
-| summary 生成时间（KST） | 2026-10-15 20:49:07.860380 | 2026-10-15 22:48:22.981649 | `generated_at_kst` |
+| summary 生成时间（KST） | 2026-10-15 20:49:07.860380 | 2026-10-17 00:16:56.671881 | `generated_at_kst` |
 | pytest 退出码 | 1 | 1 | 命令执行记录；本轮另存 `comparison.current_harness_returncode` |
 
-原始 suite 时间保留为 `2026-10-15T19:47:41.943159+08:00` / `2026-10-15T21:46:14.101612+08:00`。计数差为新增 173 个测试、passed 增加 177：新增测试全部通过，另有 4 个基线失败消失。来源为两份 JUnit 的 `(classname, name)` 集合差及后面的失败集合对照。本轮全量日志记录耗时 22.98 秒。
+原始 suite 时间保留在两份 JUnit；展示时间按 KST 记录。计数差为新增 187 个测试、passed 增加 190、skipped 增加 1：新增集合为 186 passed / 1 skipped，另有 4 个基线失败消失。来源为两份 JUnit 的 `(classname, name)` 集合差及后面的失败集合对照。
 
-全量结束后，以精确集合差生成 [173 个新增 nodeid](evidence/rolling_cache_phase1_20261015/new-tests-nodeids.json)，单独运行结果为 **173 passed / 0 failed，退出码 0，9.15 秒**。原始输出见 [new-tests-pytest.log](evidence/rolling_cache_phase1_20261015/new-tests-pytest.log)，逐项结果见 [new-tests-junit.xml](evidence/rolling_cache_phase1_20261015/new-tests-junit.xml)，完整子进程参数见 [new-tests-summary.json](evidence/rolling_cache_phase1_20261015/new-tests-summary.json)。新增测试 suite 开始时间为 `2026-10-15T22:49:15.101947+09:00`，原始 JUnit 时间 `2026-10-15T21:49:15.101947+08:00` 保留。
+全量结束后，以精确集合差生成 [187 个新增 nodeid](evidence/rolling_cache_phase1_20261015/new-tests-nodeids.json)，单独运行结果为 **186 passed / 1 skipped / 0 failed / 0 error，退出码 0**。原始输出见 [new-tests-pytest.log](evidence/rolling_cache_phase1_20261015/new-tests-pytest.log)，逐项结果见 [new-tests-junit.xml](evidence/rolling_cache_phase1_20261015/new-tests-junit.xml)，完整子进程参数见 [new-tests-summary.json](evidence/rolling_cache_phase1_20261015/new-tests-summary.json)。
 
 ## 完整失败名单
 
@@ -64,7 +64,7 @@
 
 **已确认，污染检测仅适配测试替身：** 两项 fixture 将 `_compose_base_args` 的 lambda 更新为接收 `additional_profiles` 关键字参数，使正式 retention 上限读取继续得到 mock Compose 数据。此前的 `formal_retention:TypeError` 和缺失 finding 原因保存在历史 [单 sink 产物](evidence/rolling_cache_phase1_20261015/history/harness-before-authorized-repair/new-test-pollution-single.json) / [双 sink 产物](evidence/rolling_cache_phase1_20261015/history/harness-before-authorized-repair/new-test-pollution-dual.json)。被测污染判定逻辑语义未因这两项修改改变。本轮两项均恢复四类 finding 的原断言并通过。
 
-**已确认，提前失败报告边界：** 此轮另增加 4 项真实 CLI 子进程测试，覆盖参数解析或配置构造前的失败，要求报告含失败原因和退出码。它们包含在 173 项新增集合中，均通过。报告契约的生产实现和实机只读预检详见阶段 1 主文档。
+**已确认，提前失败报告边界：** 此轮另增加 4 项真实 CLI 子进程测试，覆盖参数解析或配置构造前的失败，要求报告含失败原因和退出码。它们包含在 187 项新增集合中，均通过。报告契约的生产实现和实机只读预检详见阶段 1 主文档。
 
 ## 消失的 4 项为何变化
 
@@ -84,6 +84,6 @@
 
 ## 已确认、推断与未核实
 
-- **已确认：** 本轮为 11 个失败，新增失败 0 项；失败集合及 collection error 均为基线子集；173 项新增测试全部通过；上述 4 项基线失败消失的代码/fixture 变化与保存的堆栈相符。
+- **已确认：** 本轮为 11 个失败，新增失败 0 项；失败集合及 collection error 均为基线子集；187 项新增测试为 186 passed / 1 skipped / 0 failed / 0 error；上述 4 项基线失败消失的代码/fixture 变化与保存的堆栈相符。
 - **推断：** 持续存在的导入、文件缺失、Docker/数据库环境类问题可能受本机测试环境影响；此表不把全部持续失败都归为环境问题，也不判断其生产影响。
 - **未核实：** 本机 Harness 不证明生产服务行为、带负载恢复或阶段 2 运行结果；Opus 审查结果由后续交审记录确认。本轮测试未接正式数据库、未启动 Docker 服务。

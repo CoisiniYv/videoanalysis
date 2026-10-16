@@ -50,7 +50,7 @@ from libs.evidence_lifecycle import (
     ACTIVE_MATERIALIZATION_STATUSES,
     TERMINAL_MATERIALIZATION_STATUSES,
 )
-from scripts.runtime.pressure_baseline_guard import baseline_pollution
+from scripts.runtime.pressure_baseline_guard import baseline_pollution, is_pressure_source
 from scripts.runtime.pressure_storage_guard import (
     CACHE_TARGETS, StoragePreflightError, parse_compose_cache_sources, validate_cache_sources,
 )
@@ -131,6 +131,16 @@ DUAL_SHARD_SERVICES = [
     "replay-f",
     "replay-g",
     "replay-h",
+]
+# These are the operator-owned dual containers that the pressure override can
+# recreate with pressure-only environment, mounts, or labels.  The remaining
+# dual replay/evidence services are not part of the operator profile and are
+# restored by their own paths when applicable.
+DUAL_SHARD_OPERATOR_RUNTIME_BASE_SERVICES = [
+    "savant-a",
+    "savant-b",
+    "replay-raw-fanout-a",
+    "replay-raw-fanout-b",
 ]
 DUAL_SHARD_LEGACY_REPLAY_SERVICES = [
     "video-file-sink-a",
@@ -272,7 +282,16 @@ DOCKER_RUNTIME_LOG_TIMEOUT_S = 30.0
 EVIDENCE_WINDOW_DURATION_TOLERANCE_S = 1.25
 PRESSURE_COOLDOWN_SECONDS = 30
 PRESSURE_COOLDOWN_GRACE_MS = 1000
-PRESSURE_COOLDOWN_EVENT_TYPES = ("intrusion", "watchlist_hit")
+# All event types that can consume the pressure algorithm cooldown budget.
+# Behaviour events are included so B-round violation counts cannot under-report
+# fall, crowd-gathering, or chasing events.
+PRESSURE_COOLDOWN_EVENT_TYPES = (
+    "intrusion",
+    "watchlist_hit",
+    "fall",
+    "crowd_gathering",
+    "chasing",
+)
 WORKER_CONTAINER_NAMES = {
     "event_worker": "video-analytics-midterm-event-worker",
     "person_worker": "video-analytics-midterm-person-observation-worker",
@@ -528,6 +547,8 @@ class PressureConfig:
     rolling_cache_publication_metadata_layout: str = "split"
     allow_rotational_rolling_cache: bool = False
     preflight_without_storage_override: bool = False
+    rolling_cache_bytes_per_second: float = 0.0
+    preflight_runtime_readback: bool = False
 
 
 PRESSURE_BEHAVIOR_RULES = ("fall", "crowd_gathering", "chasing")
@@ -565,7 +586,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--preflight-without-storage-override", action="store_true")
+    parser.add_argument(
+        "--preflight-runtime-readback",
+        action="store_true",
+        help="During --preflight-only, read back rendered forwarder/Savant settings and code hashes.",
+    )
     parser.add_argument("--allow-rotational-rolling-cache", action="store_true")
+    parser.add_argument(
+        "--rolling-cache-bytes-per-second",
+        type=float,
+        default=0.0,
+        help=(
+            "Fallback input byte rate for rolling-cache preflight when ffprobe "
+            "cannot report a bitrate; zero keeps the fail-closed behaviour."
+        ),
+    )
     parser.add_argument("--fps", default=DEFAULT_PRESSURE_FPS, help="Target pressure FPS, e.g. 8/1.")
     parser.add_argument("--min-fps", default="1/1")
     parser.add_argument("--streams", type=int, default=60)
@@ -1303,6 +1338,24 @@ def perform_storage_preflight(cfg: PressureConfig) -> tuple[dict[str, Any], dict
     )
 
 
+def perform_runtime_preflight_readback(
+    cfg: PressureConfig, rendered_pressure_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Read back the rendered pressure runtime without creating containers."""
+    selection = runtime_readback_services(cfg)
+    expected_env = expected_forwarder_environment(
+        rendered_pressure_config, selection["forwarders"]
+    )
+    return collect_runtime_readback(
+        cfg,
+        expected_forwarder_env=expected_env,
+        docker_env=docker_container_env,
+        run_command=_readonly_command,
+        source_root=REPO_ROOT,
+        read_savant=not cfg.forwarder_null_sink,
+    )
+
+
 def restore_after_preflight_abort() -> dict[str, Any]:
     # No mutation is reachable before this guard, so recovery must issue no writes.
     return {"status": "unchanged", "reason": "aborted_before_any_runtime_or_database_mutation"}
@@ -1321,6 +1374,8 @@ def formal_restore_config(cfg: PressureConfig) -> PressureConfig:
     env_file = base.parent / "env" / "midterm.env"
     if not env_file.is_file() or not base.with_name("midterm-storage.override.yml").is_file():
         raise StoragePreflightError("formal restore env/storage override missing")
+    if cfg.dual_shard_same_gpu and not base.with_name("operator-dual-runtime.override.yml").is_file():
+        raise StoragePreflightError("formal operator dual runtime override missing")
     return replace(cfg, compose_file=str(base), env_file=str(env_file),
                    pressure_rolling_cache_host_root="",
                    pressure_rolling_cache_materialized_host_root="")
@@ -1474,6 +1529,8 @@ def _prepare_pressure_run(argv: list[str]) -> tuple[argparse.Namespace, Pressure
         raise SystemExit("--media-worker-rolling-max-per-poll must be positive")
     if args.rolling_cache_min_raw_fps < 0:
         raise SystemExit("--rolling-cache-min-raw-fps must be non-negative")
+    if args.rolling_cache_bytes_per_second < 0:
+        raise SystemExit("--rolling-cache-bytes-per-second must be non-negative")
     if args.pressure_rolling_cache_retention_s < 0:
         raise SystemExit(
             "--pressure-rolling-cache-retention-s must be non-negative"
@@ -1526,6 +1583,11 @@ def _prepare_pressure_run(argv: list[str]) -> tuple[argparse.Namespace, Pressure
             "--dual-shard-api so clip-worker can be wired to the topology "
             "replay shard plan."
         )
+    # Parse registry defaults before any database, camera, or Compose mutation.
+    # This makes an invalid behavior-rule registry a preflight/configuration
+    # failure rather than a mid-run failure after services have stopped.
+    if args.behavior_rules:
+        pressure_behavior_rule_defaults(args.behavior_rules)
     run_id = args.run_id or _default_run_id(
         args.fps,
         forwarder_null_sink=args.forwarder_null_sink,
@@ -1763,6 +1825,8 @@ def _prepare_pressure_run(argv: list[str]) -> tuple[argparse.Namespace, Pressure
         preserve_warmup_results=bool(args.preserve_warmup_results),
         allow_rotational_rolling_cache=bool(args.allow_rotational_rolling_cache),
         preflight_without_storage_override=bool(args.preflight_without_storage_override),
+        rolling_cache_bytes_per_second=float(args.rolling_cache_bytes_per_second),
+        preflight_runtime_readback=bool(args.preflight_runtime_readback),
     )
     return args, cfg
 
@@ -1783,6 +1847,22 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_dir": str(cfg.artifact_dir),
         "steps": [],
     }
+
+    def restore_step(name: str, operation):
+        """Run one recovery operation without allowing it to mask later steps."""
+        report.setdefault("restore_steps", []).append(name)
+        try:
+            result = operation()
+        except Exception as exc:
+            report.setdefault("restore_errors", []).append(
+                {"step": name, "error": repr(exc)}
+            )
+            report["status"] = "failed_restore_verification"
+            return None
+        if result is not None:
+            report[name] = result
+        return result
+
     write_json(cfg.artifact_dir / "run_config.json", report["config"])
     try:
         report["compose_config"] = compose_config_paths(cfg)
@@ -1797,6 +1877,29 @@ def main(argv: list[str] | None = None) -> int:
         write_json(cfg.artifact_dir / "report.json", report)
         return 2
     if args.preflight_only:
+        if cfg.preflight_runtime_readback:
+            try:
+                report["runtime_config_readback"] = perform_runtime_preflight_readback(
+                    cfg, rendered_pressure_config
+                )
+            except Exception as exc:
+                diagnostic = preflight_failure_report(
+                    exc,
+                    report={
+                        "runtime_config_readback": getattr(exc, "report", {}),
+                    },
+                    section="runtime_readback",
+                )
+                report["runtime_config_readback"] = diagnostic.get(
+                    "runtime_config_readback", getattr(exc, "report", {})
+                )
+                report["status"] = "preflight_failed"
+                report["reason"] = diagnostic["reason"]
+                report["errors"] = diagnostic["errors"]
+                report["exit_code"] = 2
+                report["preflight_recovery"] = restore_after_preflight_abort()
+                write_json(cfg.artifact_dir / "report.json", report)
+                return 2
         report["status"] = "preflight_passed"
         report["reason"] = "passed"
         report["exit_code"] = 0
@@ -1820,6 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
     original_event_worker_evidence_env: dict[str, str] | None = None
     original_media_worker_rolling_env: dict[str, str] | None = None
     original_rolling_cache_sink_states: dict[str, dict[str, Any]] | None = None
+    original_dual_shard_runtime: dict[str, Any] | None = None
     original_worker_cpu_isolation: dict[str, Any] | None = None
     original_redis_save_schedule: str | None = None
     redis_rdb_pressure_baseline: dict[str, Any] | None = None
@@ -1839,6 +1943,89 @@ def main(argv: list[str] | None = None) -> int:
     pressure_started_monotonic: float | None = None
     pressure_sources_path: Path | None = None
     started_at = datetime.now(timezone.utc)
+
+    def restore_abort_steps(artifact_suffix: str) -> None:
+        """Best-effort recovery used by exception paths, preserving step order."""
+        if cfg.dual_shard_same_gpu:
+            # Stop the pressure topology before restoring any dependent service.
+            restore_step("stop_dual_shard_runtime", lambda: stop_dual_shard_runtime(cfg))
+        if original_cameras:
+            restore_step("restore_cameras", lambda: restore_cameras(conn, original_cameras))
+        if original_clip_worker_replay_shards is not None:
+            restore_step(
+                "clip_worker_replay_shards_restore",
+                lambda: configure_clip_worker_replay_shards(
+                    restore_cfg,
+                    replay_shards_json=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_JSON", ""
+                    ),
+                    replay_shards_config_path=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_CONFIG_PATH", ""
+                    ),
+                    artifact_name=f"compose_restore_clip_worker_replay_shards_{artifact_suffix}.log",
+                    materialization_event_type_quotas=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS", ""
+                    ),
+                    density_profile=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_DENSITY_PROFILE", ""
+                    ),
+                    materialization_pressure_level=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL", ""
+                    ),
+                    max_jobs_per_run=original_clip_worker_replay_shards.get(
+                        "CLIP_WORKER_MAX_JOBS_PER_RUN", ""
+                    ),
+                ),
+            )
+        if original_event_worker_evidence_env is not None:
+            restore_step(
+                "event_worker_evidence_admission_restore",
+                lambda: configure_event_worker_evidence_admission(
+                    restore_cfg,
+                    values=original_event_worker_evidence_env,
+                    artifact_name=f"compose_restore_event_worker_evidence_admission_{artifact_suffix}.log",
+                ),
+            )
+        if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+            restore_step(
+                "media_worker_rolling_cache_restore",
+                lambda: configure_media_worker_rolling_cache(
+                    restore_cfg,
+                    values=original_media_worker_rolling_env,
+                    artifact_name=f"compose_restore_media_worker_rolling_cache_{artifact_suffix}.log",
+                ),
+            )
+        if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
+            restore_step(
+                "rolling_cache_sinks_restore",
+                lambda: restore_rolling_cache_sinks_after_pressure(
+                    restore_cfg,
+                    original_states=original_rolling_cache_sink_states,
+                    artifact_name=f"compose_restore_rolling_cache_sinks_{artifact_suffix}.log",
+                ),
+            )
+        if original_topology is not None:
+            restore_step(
+                "topology_restore",
+                lambda: api_json(
+                    cfg.api_base, "PUT", "/runtime/topology-config", original_topology
+                ),
+            )
+        if original_perf:
+            restore_step(
+                "restore_runtime",
+                lambda: restore_runtime(restore_cfg, original_perf),
+            )
+        if original_dual_shard_runtime is not None:
+            restore_step(
+                "dual_shard_runtime_restore",
+                lambda: restore_dual_shard_runtime(
+                    restore_cfg,
+                    original_dual_shard_runtime,
+                    artifact_name=f"compose_restore_dual_shard_runtime_{artifact_suffix}.log",
+                ),
+            )
+
     try:
         if cfg.pressure_rolling_cache_host_root:
             report["pressure_cache_host_mounts"] = prepare_pressure_cache_host_mounts(
@@ -1881,6 +2068,11 @@ def main(argv: list[str] | None = None) -> int:
         original_event_worker_evidence_env = event_worker_evidence_env_snapshot()
         original_media_worker_rolling_env = media_worker_rolling_cache_env_snapshot(full=True)
         original_rolling_cache_sink_states = rolling_cache_sink_state_snapshot()
+        if cfg.dual_shard_same_gpu:
+            # Capture operator-owned dual containers before any pressure-side
+            # compose recreation or topology mutation can occur.
+            original_dual_shard_runtime = dual_shard_runtime_snapshot(cfg)
+            report["dual_shard_runtime_before"] = original_dual_shard_runtime
         report["baseline_pollution"] = collect_baseline_pollution(conn, cfg, restore_cfg)
         if cfg.cpu_isolation_profile != "none":
             original_worker_cpu_isolation = apply_worker_cpu_isolation(cfg, restore_cfg=restore_cfg)
@@ -2140,7 +2332,8 @@ def main(argv: list[str] | None = None) -> int:
             expected_env = expected_forwarder_environment(rendered_pressure_config, selection["forwarders"])
             report["runtime_config_readback"] = collect_runtime_readback(
                 cfg, expected_forwarder_env=expected_env, docker_env=docker_container_env,
-                run_command=_readonly_command, source_root=REPO_ROOT)
+                run_command=_readonly_command, source_root=REPO_ROOT,
+                read_savant=not cfg.forwarder_null_sink)
         except RuntimeReadbackError as exc:
             report["runtime_config_readback"] = exc.report
             raise
@@ -2436,93 +2629,129 @@ def main(argv: list[str] | None = None) -> int:
         elif cfg.cleanup:
             report["cleanup"] = cleanup_pressure_runtime_only(conn, redis_client, cfg)
         if original_redis_save_schedule is not None:
-            report["redis_rdb_restore"] = restore_redis_rdb_after_pressure(
-                redis_client,
-                cfg,
-                save_schedule=original_redis_save_schedule,
+            restore_step(
+                "redis_rdb_restore",
+                lambda: restore_redis_rdb_after_pressure(
+                    redis_client,
+                    cfg,
+                    save_schedule=original_redis_save_schedule,
+                ),
             )
             original_redis_save_schedule = None
         if original_postgres_checkpoint_settings is not None:
-            report["postgres_checkpoint_restore"] = (
-                restore_postgres_checkpoints_after_pressure(
+            restore_step(
+                "postgres_checkpoint_restore",
+                lambda: restore_postgres_checkpoints_after_pressure(
                     conn,
                     cfg,
                     settings=original_postgres_checkpoint_settings,
-                )
+                ),
             )
             original_postgres_checkpoint_settings = None
-        restore_cameras(conn, original_cameras)
+        if cfg.dual_shard_same_gpu:
+            # Stop the pressure topology before restoring its dependent workers.
+            restore_step("stop_dual_shard_runtime", lambda: stop_dual_shard_runtime(cfg))
+        restore_step("restore_cameras", lambda: restore_cameras(conn, original_cameras))
         if cfg.rolling_cache_evidence:
-            report["evidence_task_gate_cleanup"] = (
-                clear_pressure_evidence_task_gate(redis_client, cfg)
+            restore_step(
+                "evidence_task_gate_cleanup",
+                lambda: clear_pressure_evidence_task_gate(redis_client, cfg),
             )
-        if cfg.cuda_mps:
-            report["cuda_mps_stop"] = read_cuda_mps_stop_summary(cfg)
         if original_clip_worker_replay_shards is not None:
-            report["clip_worker_replay_shards_restore"] = configure_clip_worker_replay_shards(
-                restore_cfg,
-                replay_shards_json=original_clip_worker_replay_shards.get(
-                    "REPLAY_SHARDS_JSON",
-                    "",
-                ),
-                replay_shards_config_path=original_clip_worker_replay_shards.get(
-                    "REPLAY_SHARDS_CONFIG_PATH",
-                    "",
-                ),
-                artifact_name="compose_restore_clip_worker_replay_shards.log",
-                materialization_event_type_quotas=(
-                    original_clip_worker_replay_shards.get(
-                        "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+            restore_step(
+                "clip_worker_replay_shards_restore",
+                lambda: configure_clip_worker_replay_shards(
+                    restore_cfg,
+                    replay_shards_json=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_JSON",
                         "",
-                    )
-                ),
-                density_profile=original_clip_worker_replay_shards.get(
-                    "EVIDENCE_DENSITY_PROFILE",
-                    "",
-                ),
-                materialization_pressure_level=original_clip_worker_replay_shards.get(
-                    "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
-                    "",
-                ),
-                max_jobs_per_run=original_clip_worker_replay_shards.get(
-                    "CLIP_WORKER_MAX_JOBS_PER_RUN",
-                    "",
+                    ),
+                    replay_shards_config_path=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_CONFIG_PATH",
+                        "",
+                    ),
+                    artifact_name="compose_restore_clip_worker_replay_shards.log",
+                    materialization_event_type_quotas=(
+                        original_clip_worker_replay_shards.get(
+                            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+                            "",
+                        )
+                    ),
+                    density_profile=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_DENSITY_PROFILE",
+                        "",
+                    ),
+                    materialization_pressure_level=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
+                        "",
+                    ),
+                    max_jobs_per_run=original_clip_worker_replay_shards.get(
+                        "CLIP_WORKER_MAX_JOBS_PER_RUN",
+                        "",
+                    ),
                 ),
             )
         if original_event_worker_evidence_env is not None:
-            report["event_worker_evidence_admission_restore"] = (
-                configure_event_worker_evidence_admission(
+            restore_step(
+                "event_worker_evidence_admission_restore",
+                lambda: configure_event_worker_evidence_admission(
                     restore_cfg,
                     values=original_event_worker_evidence_env,
                     artifact_name="compose_restore_event_worker_evidence_admission.log",
-                )
+                ),
             )
         if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
-            report["media_worker_rolling_cache_restore"] = (
-                configure_media_worker_rolling_cache(
+            restore_step(
+                "media_worker_rolling_cache_restore",
+                lambda: configure_media_worker_rolling_cache(
                     restore_cfg,
                     values=original_media_worker_rolling_env,
                     artifact_name="compose_restore_media_worker_rolling_cache.log",
-                )
+                ),
             )
         if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
-            report["rolling_cache_sinks_restore"] = restore_rolling_cache_sinks_after_pressure(
-                restore_cfg,
-                original_states=original_rolling_cache_sink_states,
-                artifact_name="compose_restore_rolling_cache_sinks.log",
+            restore_step(
+                "rolling_cache_sinks_restore",
+                lambda: restore_rolling_cache_sinks_after_pressure(
+                    restore_cfg,
+                    original_states=original_rolling_cache_sink_states,
+                    artifact_name="compose_restore_rolling_cache_sinks.log",
+                ),
             )
             if not _env_bool(
                 (original_media_worker_rolling_env or {}).get("ROLLING_CACHE_ENABLED", "")
             ):
-                report["rolling_cache_sinks_stop_after_pressure"] = (
-                    stop_rolling_cache_sinks_after_pressure(
+                restore_step(
+                    "rolling_cache_sinks_stop_after_pressure",
+                    lambda: stop_rolling_cache_sinks_after_pressure(
                         restore_cfg,
                         artifact_name="compose_stop_rolling_cache_sinks_after_pressure.log",
-                    )
+                    ),
                 )
         if original_topology is not None:
-            api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
-        restore_runtime(restore_cfg, original_perf)
+            restore_step(
+                "topology_restore",
+                lambda: api_json(
+                    cfg.api_base, "PUT", "/runtime/topology-config", original_topology
+                ),
+            )
+        restore_step(
+            "restore_runtime",
+            lambda: restore_runtime(restore_cfg, original_perf),
+        )
+        if cfg.cuda_mps:
+            # ``restore_runtime`` stops MPS; read its state afterwards so the
+            # report describes the post-stop state rather than the pre-stop one.
+            restore_step("cuda_mps_stop", lambda: read_cuda_mps_stop_summary(cfg))
+        if original_dual_shard_runtime is not None:
+            restore_step(
+                "dual_shard_runtime_restore",
+                lambda: restore_dual_shard_runtime(
+                    restore_cfg,
+                    original_dual_shard_runtime,
+                    artifact_name="compose_restore_dual_shard_runtime.log",
+                ),
+            )
         if cfg.cleanup and cfg.discard_pressure_results:
             report["cleanup_after_restore"] = cleanup_pressure_data(
                 conn,
@@ -2537,13 +2766,17 @@ def main(argv: list[str] | None = None) -> int:
                 redis_client,
                 cfg,
             )
-        report["source_container_cleanup_stable"] = (
-            remove_pressure_source_containers_until_stable(cfg.run_id)
+        restore_step(
+            "source_container_cleanup_stable",
+            lambda: remove_pressure_source_containers_until_stable(cfg.run_id),
         )
         if original_worker_cpu_isolation is not None:
-            report["cpu_isolation_restore"] = restore_worker_cpu_isolation(
-                restore_cfg,
-                original_worker_cpu_isolation,
+            restore_step(
+                "cpu_isolation_restore",
+                lambda: restore_worker_cpu_isolation(
+                    restore_cfg,
+                    original_worker_cpu_isolation,
+                ),
             )
             original_worker_cpu_isolation = None
         report["db_summary_after_cleanup"] = db_summary(
@@ -2560,7 +2793,8 @@ def main(argv: list[str] | None = None) -> int:
                 cleanup_pressure_cache_host_mounts(cfg)
             )
             pressure_cache_host_mounts_prepared = False
-        report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
+        if report.get("status") != "failed_restore_verification":
+            report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
         write_json(cfg.artifact_dir / "report.json", report)
         print(f"PRESSURE_RUN_STATUS={report['status']}")
         print(f"RUN_ID={cfg.run_id}")
@@ -2584,61 +2818,7 @@ def main(argv: list[str] | None = None) -> int:
                 report,
                 runtime_epoch_root=runtime_epoch_root,
             )
-            if original_cameras:
-                restore_cameras(conn, original_cameras)
-            if original_clip_worker_replay_shards is not None:
-                configure_clip_worker_replay_shards(
-                    restore_cfg,
-                    replay_shards_json=original_clip_worker_replay_shards.get(
-                        "REPLAY_SHARDS_JSON",
-                        "",
-                    ),
-                    replay_shards_config_path=original_clip_worker_replay_shards.get(
-                        "REPLAY_SHARDS_CONFIG_PATH",
-                        "",
-                    ),
-                    artifact_name="compose_restore_clip_worker_replay_shards_after_interrupt.log",
-                    materialization_event_type_quotas=(
-                        original_clip_worker_replay_shards.get(
-                            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
-                            "",
-                        )
-                    ),
-                    density_profile=original_clip_worker_replay_shards.get(
-                        "EVIDENCE_DENSITY_PROFILE",
-                        "",
-                    ),
-                    materialization_pressure_level=original_clip_worker_replay_shards.get(
-                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
-                        "",
-                    ),
-                    max_jobs_per_run=original_clip_worker_replay_shards.get(
-                        "CLIP_WORKER_MAX_JOBS_PER_RUN",
-                        "",
-                    ),
-                )
-            if original_event_worker_evidence_env is not None:
-                configure_event_worker_evidence_admission(
-                    restore_cfg,
-                    values=original_event_worker_evidence_env,
-                    artifact_name="compose_restore_event_worker_evidence_admission_after_interrupt.log",
-                )
-            if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
-                configure_media_worker_rolling_cache(
-                    restore_cfg,
-                    values=original_media_worker_rolling_env,
-                    artifact_name="compose_restore_media_worker_rolling_cache_after_interrupt.log",
-                )
-            if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
-                restore_rolling_cache_sinks_after_pressure(
-                    restore_cfg,
-                    original_states=original_rolling_cache_sink_states,
-                    artifact_name="compose_restore_rolling_cache_sinks_after_interrupt.log",
-                )
-            if original_topology is not None:
-                api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
-            if original_perf:
-                restore_runtime(restore_cfg, original_perf)
+            restore_abort_steps("after_interrupt")
         finally:
             return 130
     except Exception as exc:
@@ -2658,61 +2838,7 @@ def main(argv: list[str] | None = None) -> int:
                 report,
                 runtime_epoch_root=runtime_epoch_root,
             )
-            if original_cameras:
-                restore_cameras(conn, original_cameras)
-            if original_clip_worker_replay_shards is not None:
-                configure_clip_worker_replay_shards(
-                    restore_cfg,
-                    replay_shards_json=original_clip_worker_replay_shards.get(
-                        "REPLAY_SHARDS_JSON",
-                        "",
-                    ),
-                    replay_shards_config_path=original_clip_worker_replay_shards.get(
-                        "REPLAY_SHARDS_CONFIG_PATH",
-                        "",
-                    ),
-                    artifact_name="compose_restore_clip_worker_replay_shards_after_failure.log",
-                    materialization_event_type_quotas=(
-                        original_clip_worker_replay_shards.get(
-                            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
-                            "",
-                        )
-                    ),
-                    density_profile=original_clip_worker_replay_shards.get(
-                        "EVIDENCE_DENSITY_PROFILE",
-                        "",
-                    ),
-                    materialization_pressure_level=original_clip_worker_replay_shards.get(
-                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
-                        "",
-                    ),
-                    max_jobs_per_run=original_clip_worker_replay_shards.get(
-                        "CLIP_WORKER_MAX_JOBS_PER_RUN",
-                        "",
-                    ),
-                )
-            if original_event_worker_evidence_env is not None:
-                configure_event_worker_evidence_admission(
-                    restore_cfg,
-                    values=original_event_worker_evidence_env,
-                    artifact_name="compose_restore_event_worker_evidence_admission_after_failure.log",
-                )
-            if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
-                configure_media_worker_rolling_cache(
-                    restore_cfg,
-                    values=original_media_worker_rolling_env,
-                    artifact_name="compose_restore_media_worker_rolling_cache_after_failure.log",
-                )
-            if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
-                restore_rolling_cache_sinks_after_pressure(
-                    restore_cfg,
-                    original_states=original_rolling_cache_sink_states,
-                    artifact_name="compose_restore_rolling_cache_sinks_after_failure.log",
-                )
-            if original_topology is not None:
-                api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
-            if original_perf:
-                restore_runtime(restore_cfg, original_perf)
+            restore_abort_steps("after_failure")
         finally:
             return 1
     finally:
@@ -2750,11 +2876,12 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
         if original_worker_cpu_isolation is not None:
-            try:
-                restore_worker_cpu_isolation(restore_cfg, original_worker_cpu_isolation)
-            except Exception as exc:
-                report["cpu_isolation_restore_error"] = repr(exc)
-                report["status"] = "failed_restore_verification"
+            restore_step(
+                "cpu_isolation_restore",
+                lambda: restore_worker_cpu_isolation(
+                    restore_cfg, original_worker_cpu_isolation
+                ),
+            )
         if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
             try:
                 report["rolling_cache_storage"]["post_restore"] = restored_cache_readback(restore_cfg)
@@ -2762,7 +2889,9 @@ def main(argv: list[str] | None = None) -> int:
                     report["pressure_cache_host_mounts_cleanup"] = cleanup_pressure_cache_host_mounts(cfg)
             except Exception as exc:
                 report["status"] = "failed_restore_verification"
-                report["restore_verification_error"] = repr(exc)
+                report.setdefault("restore_errors", []).append(
+                    {"step": "restored_cache_readback", "error": repr(exc)}
+                )
                 report["pressure_cache_host_mounts_cleanup"] = {
                     "status": "preserved", "reason": "restore_not_verified"
                 }
@@ -3296,6 +3425,316 @@ def dual_shard_services(cfg: PressureConfig) -> list[str]:
     if cfg.adaface_roi_redis:
         services.append(ADAFACE_ROI_WORKER_SERVICE)
     return services
+
+
+def dual_shard_operator_runtime_services(cfg: PressureConfig) -> list[str]:
+    """Return operator-owned containers that pressure may recreate.
+
+    The pressure dual override can add ROI and decoupled AdaFace services in
+    addition to the two Savant and raw fanout branches.  Keep this list
+    explicit: services that are only in the historical dual-replay profile do
+    not have an ``operator-dual-runtime`` definition to restore with.
+    """
+
+    services = list(DUAL_SHARD_OPERATOR_RUNTIME_BASE_SERVICES)
+    if cfg.adaface_roi_redis:
+        services.append(ADAFACE_ROI_WORKER_SERVICE)
+    if cfg.adaface_decoupled:
+        services.extend(["adaface-forwarder-a", "adaface-forwarder-b"])
+        services.extend(adaface_central_service_names(cfg))
+    return list(dict.fromkeys(services))
+
+
+def _container_environment_from_inspect(inspected: dict[str, Any]) -> dict[str, str]:
+    values = (inspected.get("Config") or {}).get("Env")
+    if not isinstance(values, list):
+        raise RuntimeError("container environment is missing from inspect snapshot")
+    environment: dict[str, str] = {}
+    for value in values:
+        key, separator, item = str(value).partition("=")
+        if separator:
+            environment[key] = item
+    return environment
+
+
+def dual_shard_runtime_snapshot(cfg: PressureConfig) -> dict[str, Any]:
+    """Capture every field needed to verify an exact dual-runtime restore.
+
+    This runs before any pressure ``up --force-recreate`` call.  A missing or
+    incomplete container is a hard error so pressure cannot proceed with an
+    un-restorable operator runtime.
+    """
+
+    containers: dict[str, Any] = {}
+    optional_services = set()
+    if cfg.adaface_decoupled:
+        optional_services.update(["adaface-forwarder-a", "adaface-forwarder-b"])
+        optional_services.update(adaface_central_service_names(cfg))
+    for service in dual_shard_operator_runtime_services(cfg):
+        name = f"video-analytics-midterm-{service}"
+        inspected = inspect_container(name)
+        if not inspected:
+            if service in optional_services:
+                containers[service] = {
+                    "service": service,
+                    "container": name,
+                    "exists": False,
+                    "running": False,
+                }
+                continue
+            raise RuntimeError(f"missing dual runtime snapshot container {name}")
+        config = inspected.get("Config") or {}
+        state = inspected.get("State") or {}
+        if not isinstance(config, dict) or not isinstance(state, dict):
+            raise RuntimeError(f"incomplete dual runtime snapshot for {name}")
+        if "Image" not in inspected or not str(inspected.get("Image") or "") or "Mounts" not in inspected:
+            raise RuntimeError(f"incomplete dual runtime snapshot for {name}")
+        if not isinstance(config.get("Labels"), dict):
+            raise RuntimeError(f"container labels are missing from snapshot for {name}")
+        environment = _container_environment_from_inspect(inspected)
+        if not isinstance(state.get("Running"), bool):
+            raise RuntimeError(f"container running state is missing from snapshot for {name}")
+        containers[service] = {
+            "service": service,
+            "container": name,
+            "exists": True,
+            "environment": environment,
+            "image": str(inspected.get("Image") or ""),
+            "mounts": copy.deepcopy(inspected.get("Mounts") or []),
+            "labels": copy.deepcopy(config.get("Labels") or {}),
+            "running": bool(state.get("Running")),
+            "status": str(state.get("Status") or ""),
+            "state": copy.deepcopy(state),
+        }
+    snapshot = {
+        "status": "captured",
+        "services": list(containers),
+        "containers": containers,
+    }
+    write_json(cfg.artifact_dir / "dual_shard_runtime_before.json", snapshot)
+    return snapshot
+
+
+def _formal_operator_dual_runtime_override(cfg: PressureConfig) -> Path:
+    compose_file = Path(cfg.compose_file).resolve()
+    override = compose_file.with_name("operator-dual-runtime.override.yml")
+    if not override.is_file():
+        raise RuntimeError(f"formal operator dual runtime override is missing: {override}")
+    return override
+
+
+def _dual_shard_restore_compose_args(
+    cfg: PressureConfig,
+    environment_override: Path,
+) -> list[str]:
+    """Build the exact formal compose stack used for dual-runtime restore."""
+
+    operator_override = _formal_operator_dual_runtime_override(cfg)
+    args = compose_invocation_args(
+        cfg,
+        additional_profiles=("operator-dual-runtime",),
+        override_files=(operator_override, environment_override),
+    )
+    if not any(
+        value == str(Path(cfg.compose_file).with_name("midterm-storage.override.yml").resolve())
+        for value in args
+    ):
+        raise RuntimeError("formal storage override is missing for dual runtime restore")
+    return args
+
+
+def _canonical_mounts(value: Any) -> list[Any]:
+    mounts = value if isinstance(value, list) else []
+    return sorted(
+        (copy.deepcopy(item) for item in mounts),
+        key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _dual_shard_snapshot_diff(expected: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any]:
+    differences: dict[str, Any] = {}
+    for key in ("environment", "image", "labels"):
+        if observed.get(key) != expected.get(key):
+            differences[key] = {
+                "expected": expected.get(key),
+                "observed": observed.get(key),
+            }
+    if _canonical_mounts(observed.get("mounts")) != _canonical_mounts(expected.get("mounts")):
+        differences["mounts"] = {
+            "expected": expected.get("mounts"),
+            "observed": observed.get("mounts"),
+        }
+    # Compose ``up --no-start`` legitimately changes an exited container's
+    # Docker status to ``created`` while preserving the required stopped
+    # state.  Compare the running bit; retain the original status in the
+    # snapshot/report for audit purposes.
+    for key in ("running",):
+        if observed.get(key) != expected.get(key):
+            differences[key] = {
+                "expected": expected.get(key),
+                "observed": observed.get(key),
+            }
+    return differences
+
+
+def restore_dual_shard_runtime(
+    cfg: PressureConfig,
+    snapshot: dict[str, Any],
+    *,
+    artifact_name: str = "compose_restore_dual_shard_runtime.log",
+) -> dict[str, Any]:
+    """Recreate the operator dual containers and verify a bidirectional match."""
+
+    expected_containers = snapshot.get("containers") or {}
+    services = list(snapshot.get("services") or expected_containers)
+    if not services or set(services) != set(expected_containers):
+        raise RuntimeError("incomplete dual runtime restoration snapshot")
+    for service in services:
+        row = expected_containers.get(service) or {}
+        if row.get("exists", True) is False:
+            continue
+        if not isinstance(row.get("environment"), dict):
+            raise RuntimeError(f"missing environment snapshot for {service}")
+        for key in ("image", "mounts", "labels", "running", "status"):
+            if key not in row:
+                raise RuntimeError(f"missing {key} snapshot for {service}")
+
+    override_path = cfg.artifact_dir / artifact_name.replace(
+        ".log", ".environment.override.yml"
+    )
+    write_text(
+        override_path,
+        yaml.safe_dump(
+            {
+                "services": {
+                    service: {
+                        "environment": {
+                            key: str(value).replace("$", "$$")
+                            for key, value in (expected_containers[service]["environment"] or {}).items()
+                        }
+                    }
+                    for service in services
+                    if (expected_containers[service] or {}).get("exists", True) is not False
+                }
+            },
+            sort_keys=False,
+        ),
+    )
+    compose_prefix = _dual_shard_restore_compose_args(cfg, override_path)
+    existing_services = [
+        service
+        for service in services
+        if (expected_containers[service] or {}).get("exists", True) is not False
+    ]
+    original_stopped = [
+        service
+        for service in existing_services
+        if not bool(expected_containers[service]["running"])
+    ]
+    original_running = [
+        service
+        for service in existing_services
+        if bool(expected_containers[service]["running"])
+    ]
+    commands: list[dict[str, Any]] = []
+    removed_absent: list[str] = []
+    for service in services:
+        row = expected_containers[service]
+        if row.get("exists", True) is not False:
+            continue
+        container = str(row["container"])
+        if inspect_container(container):
+            remove_command = ["docker", "rm", "-f", container]
+            run(
+                remove_command,
+                cfg.artifact_dir / artifact_name.replace(
+                    ".log", f"_{service}_remove.log"
+                ),
+                check=False,
+            )
+            commands.append({"services": [service], "removed": True, "command": remove_command})
+        removed_absent.append(service)
+    if original_stopped:
+        command = [
+            *compose_prefix,
+            "up",
+            "--no-start",
+            "--no-deps",
+            "--force-recreate",
+            "--no-build",
+            *original_stopped,
+        ]
+        run(
+            command,
+            cfg.artifact_dir / artifact_name,
+            check=True,
+        )
+        commands.append({"services": original_stopped, "running": False, "command": command})
+    if original_running:
+        command = [
+            *compose_prefix,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--no-build",
+            *original_running,
+        ]
+        run(
+            command,
+            cfg.artifact_dir / artifact_name.replace(".log", "_running.log"),
+            check=True,
+        )
+        commands.append({"services": original_running, "running": True, "command": command})
+
+    restored: dict[str, Any] = {}
+    differences: dict[str, Any] = {}
+    for service in services:
+        container = str(expected_containers[service]["container"])
+        inspected = inspect_container(container)
+        if expected_containers[service].get("exists", True) is False:
+            if inspected:
+                differences[service] = {"container": "unexpected after restore"}
+            restored[service] = {"container": container, "exists": False}
+            continue
+        if not inspected:
+            differences[service] = {"container": "missing after restore"}
+            continue
+        observed = {
+            "service": service,
+            "container": container,
+            "environment": _container_environment_from_inspect(inspected),
+            "image": str(inspected.get("Image") or ""),
+            "mounts": copy.deepcopy(inspected.get("Mounts") or []),
+            "labels": copy.deepcopy((inspected.get("Config") or {}).get("Labels") or {}),
+            "running": bool((inspected.get("State") or {}).get("Running")),
+            "status": str((inspected.get("State") or {}).get("Status") or ""),
+        }
+        restored[service] = observed
+        service_diff = _dual_shard_snapshot_diff(expected_containers[service], observed)
+        if service_diff:
+            differences[service] = service_diff
+    summary = {
+        "status": "passed" if not differences else "failed",
+        "services": services,
+        "recreated_stopped": original_stopped,
+        "restarted_running": original_running,
+        "removed_absent": removed_absent,
+        "commands": commands,
+        "original": snapshot,
+        "restored": restored,
+        "differences": differences,
+        "compose_files": [
+            compose_prefix[index + 1]
+            for index, value in enumerate(compose_prefix[:-1])
+            if value == "-f"
+        ],
+        "environment_override": str(override_path),
+    }
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    if differences:
+        raise RuntimeError(f"dual runtime restore mismatch: {differences}")
+    return summary
 
 
 def _uses_direct_rolling_cache_ingress(cfg: PressureConfig) -> bool:
@@ -5205,8 +5644,13 @@ def restore_rolling_cache_sinks_after_pressure(
         profiles = ["rolling-cache"]
         services = ["rolling-cache-sink"]
     expected_env = {}
+    absent_services: list[str] = []
     for service in services:
-        original_env = (original_states.get(service) or {}).get("environment")
+        original_state = original_states.get(service) or {}
+        if original_state.get("exists") is False:
+            absent_services.append(service)
+            continue
+        original_env = original_state.get("environment")
         if not isinstance(original_env, dict) or not original_env:
             raise RuntimeError(f"missing environment snapshot for {service}")
         expected_env[service] = dict(original_env)
@@ -5230,12 +5674,12 @@ def restore_rolling_cache_sinks_after_pressure(
     )
     services_to_stop = [
         service
-        for service in services
+        for service in expected_env
         if not bool((original_states.get(service) or {}).get("running"))
     ]
     services_to_start = [
         service
-        for service in services
+        for service in expected_env
         if bool((original_states.get(service) or {}).get("running"))
     ]
     compose_prefix = [
@@ -5281,6 +5725,20 @@ def restore_rolling_cache_sinks_after_pressure(
             env=restore_env,
             check=True,
         )
+    removed_absent = []
+    for service in absent_services:
+        container = (
+            "video-analytics-midterm-rolling-cache-sink"
+            if service == "rolling-cache-sink"
+            else f"video-analytics-midterm-{service}"
+        )
+        if (docker_container_state(container) or {}).get("exists"):
+            run(
+                ["docker", "rm", "-f", container],
+                cfg.artifact_dir / artifact_name.replace(".log", f"_{service}_remove.log"),
+                check=False,
+            )
+        removed_absent.append(service)
     after = rolling_cache_sink_state_snapshot()
     state_mismatches = {
         service: {
@@ -5289,8 +5747,12 @@ def restore_rolling_cache_sinks_after_pressure(
             "observed_status": (after.get(service) or {}).get("status"),
         }
         for service in services
-        if bool((after.get(service) or {}).get("running"))
-        != (service in services_to_start)
+        if (
+            bool((after.get(service) or {}).get("running"))
+            != (service in services_to_start)
+            or bool((after.get(service) or {}).get("exists", service not in absent_services))
+            != (service not in absent_services)
+        )
     }
     restored_raw_env = {
         service: docker_container_env(
@@ -5298,7 +5760,7 @@ def restore_rolling_cache_sinks_after_pressure(
             if service == "rolling-cache-sink"
             else f"video-analytics-midterm-{service}"
         )
-        for service in services
+        for service in expected_env
     }
     restored_env = restored_raw_env
     env_mismatches = {
@@ -5318,11 +5780,13 @@ def restore_rolling_cache_sinks_after_pressure(
         if mismatches
     }
     summary = {
+        "status": "passed" if not (state_mismatches or env_mismatches) else "failed",
         "profiles": profiles,
         "services": services,
         "stopped": services_to_stop,
         "recreated_stopped": services_to_stop,
         "restarted_running": services_to_start,
+        "removed_absent": removed_absent,
         "original": original_states,
         "after": after,
         "state_mismatches": state_mismatches,
@@ -6081,7 +6545,7 @@ def verify_pressure_camera_rules(
         SELECT id, camera_id, zone_id, rule_id, rule_type, algorithm_id,
                config, evidence_policy
         FROM camera_rules
-        WHERE camera_id=ANY(%s::uuid[]) AND enabled=true
+        WHERE camera_id=ANY(%s::text[]) AND enabled=true
         ORDER BY camera_id, algorithm_id, id
         """,
         (camera_ids,),
@@ -13407,7 +13871,11 @@ def cleanup_after_aborted_run(
 
 
 def _is_pressure_source_id(source_id: str) -> bool:
-    return bool(re.match(r"^(?:rc\d+_|pressure\d*_)", str(source_id or "")))
+    # Use the same classifier as baseline pollution detection so cleanup and
+    # restoration cannot disagree about historical pressure sources.
+    return is_pressure_source(str(source_id or "")) or bool(
+        re.match(r"^rc\d+_", str(source_id or ""))
+    )
 
 
 def _is_pressure_camera(camera: dict[str, Any]) -> bool:

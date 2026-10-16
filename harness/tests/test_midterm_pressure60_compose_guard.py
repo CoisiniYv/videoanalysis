@@ -326,6 +326,151 @@ def test_sink_restore_rejects_missing_environment_snapshot_before_recreate(modul
     assert commands == []
 
 
+def _dual_inspect_row(name, *, running=False, status="created"):
+    return {
+        "Name": f"/{name}",
+        "Image": "sha256:formal-image",
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/data/video-analytics/media",
+                "Destination": "/media",
+                "RW": True,
+            }
+        ],
+        "Config": {
+            "Env": ["ORIGINAL=value", "LITERAL=raw${VALUE}"],
+            "Labels": {
+                "com.docker.compose.project.config_files": "/formal/infra/docker-compose.midterm.yml",
+                "com.docker.compose.service": name.removeprefix("video-analytics-midterm-"),
+            },
+        },
+        "State": {"Running": running, "Status": status},
+    }
+
+
+def test_dual_runtime_snapshot_captures_env_image_mounts_labels_and_state(module, cfg, monkeypatch):
+    cfg = replace(cfg, dual_shard_same_gpu=True, adaface_roi_redis=True)
+    inspected = {}
+
+    def inspect(name):
+        inspected[name] = True
+        return _dual_inspect_row(name)
+
+    monkeypatch.setattr(module, "inspect_container", inspect)
+    snapshot = module.dual_shard_runtime_snapshot(cfg)
+    assert snapshot["services"] == [
+        "savant-a",
+        "savant-b",
+        "replay-raw-fanout-a",
+        "replay-raw-fanout-b",
+        "adaface-roi-worker",
+    ]
+    assert set(inspected) == {
+        f"video-analytics-midterm-{service}" for service in snapshot["services"]
+    }
+    row = snapshot["containers"]["savant-a"]
+    assert row["environment"]["LITERAL"] == "raw${VALUE}"
+    assert row["image"] == "sha256:formal-image"
+    assert row["mounts"][0]["Destination"] == "/media"
+    assert row["labels"]["com.docker.compose.service"] == "savant-a"
+    assert row["running"] is False
+    assert (cfg.artifact_dir / "dual_shard_runtime_before.json").exists()
+
+
+def test_dual_runtime_restore_uses_formal_operator_storage_and_snapshot_env(
+    module, cfg, tmp_path, monkeypatch
+):
+    formal = tmp_path / "formal" / "infra"
+    formal.mkdir(parents=True)
+    compose = formal / "docker-compose.midterm.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    (formal / "midterm-storage.override.yml").write_text("services: {}\n", encoding="utf-8")
+    (formal / "operator-dual-runtime.override.yml").write_text("services: {}\n", encoding="utf-8")
+    env = formal / "midterm.env"
+    env.write_text("\n", encoding="utf-8")
+    cfg = replace(
+        cfg,
+        compose_file=str(compose),
+        env_file=str(env),
+        dual_shard_same_gpu=True,
+        artifact_dir=tmp_path / "artifacts",
+    )
+    services = module.dual_shard_operator_runtime_services(cfg)
+    snapshot = {
+        "status": "captured",
+        "services": services,
+        "containers": {
+            service: {
+                "service": service,
+                "container": f"video-analytics-midterm-{service}",
+                "environment": {"ORIGINAL": "value", "LITERAL": "raw${VALUE}"},
+                "image": "sha256:formal-image",
+                "mounts": [{"Type": "bind", "Source": "/data/video-analytics/media", "Destination": "/media", "RW": True}],
+                "labels": {
+                    "com.docker.compose.project.config_files": "/formal/infra/docker-compose.midterm.yml",
+                    "com.docker.compose.service": service,
+                },
+                "running": service == "savant-a",
+                "status": "running" if service == "savant-a" else "created",
+            }
+            for service in services
+        },
+    }
+    commands = []
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, *args, **kwargs: commands.append(command)
+        or subprocess.CompletedProcess(command, 0, ""),
+    )
+    monkeypatch.setattr(
+        module,
+        "inspect_container",
+        lambda name: _dual_inspect_row(
+            name,
+            running=name.endswith("savant-a"),
+            status="running" if name.endswith("savant-a") else "created",
+        ),
+    )
+    result = module.restore_dual_shard_runtime(cfg, snapshot)
+    assert result["status"] == "passed"
+    assert len(commands) == 2
+    stopped, running = commands
+    assert "--no-start" in stopped and "-d" not in stopped
+    assert "-d" in running and "--no-start" not in running
+    for command in commands:
+        files = _compose_files(command)
+        assert files == [
+            str(compose.resolve()),
+            str((formal / "midterm-storage.override.yml").resolve()),
+            str((formal / "operator-dual-runtime.override.yml").resolve()),
+            str(cfg.artifact_dir / "compose_restore_dual_shard_runtime.environment.override.yml"),
+        ]
+        assert "--profile" in command
+        assert "operator-dual-runtime" in command
+    override = yaml.safe_load(Path(_compose_files(commands[0])[-1]).read_text())
+    assert override["services"]["savant-a"]["environment"]["LITERAL"] == "raw$${VALUE}"
+    assert set(result["recreated_stopped"]) == set(services) - {"savant-a"}
+    assert result["restarted_running"] == ["savant-a"]
+
+
+def test_dual_runtime_snapshot_records_absent_decoupled_extras_without_recreating_them(
+    module, cfg, monkeypatch
+):
+    cfg = replace(cfg, dual_shard_same_gpu=True, adaface_decoupled=True)
+
+    def inspect(name):
+        if "adaface-forwarder" in name or "savant-adaface" in name:
+            return {}
+        return _dual_inspect_row(name)
+
+    monkeypatch.setattr(module, "inspect_container", inspect)
+    snapshot = module.dual_shard_runtime_snapshot(cfg)
+    assert snapshot["containers"]["adaface-forwarder-a"]["exists"] is False
+    assert snapshot["containers"]["savant-adaface-central"]["exists"] is False
+
+
 def test_stop_dual_restore_does_not_load_pressure_override(module, cfg, monkeypatch):
     commands = []
     cfg.artifact_dir.mkdir(parents=True)

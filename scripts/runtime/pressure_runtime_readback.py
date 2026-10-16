@@ -79,6 +79,7 @@ def collect_runtime_readback(
     docker_env: Callable[[str], Mapping[str, str]],
     run_command: Callable[[list[str]], Any], source_root: str | Path,
     roi_mode: bool | None = None,
+    read_savant: bool = True,
 ) -> dict[str, Any]:
     """Fail closed on environment or source mismatches; callbacks only read Docker."""
     selection = runtime_readback_services(cfg)
@@ -143,31 +144,34 @@ def collect_runtime_readback(
             except Exception as exc:
                 record["code"]["error"] = str(exc)
                 report["errors"].append(str(exc))
-        savant_expected = {
-            "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
-            "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
-        }
-        for service in selection["savant"]:
-            container = CONTAINER_PREFIX + service
-            record = {
-                "container": container, "expected_env": savant_expected.copy(),
-                "observed_env": {}, "mismatches": {},
-                "embedding_interval_applicability": "not_applicable_roi_mode" if roi_mode else "applicable",
+        if read_savant:
+            savant_expected = {
+                "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
+                "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
             }
-            report["savant"][service] = record
-            try:
-                actual = docker_env(container)
-                record["observed_env"] = {key: actual.get(key) for key in savant_expected}
-                record["mismatches"] = {
-                    key: {"expected": value, "observed": actual.get(key)}
-                    for key, value in savant_expected.items()
-                    if not (roi_mode and key == "FACE_EMBEDDING_INFER_INTERVAL")
-                    and actual.get(key) != value
+            for service in selection["savant"]:
+                container = CONTAINER_PREFIX + service
+                record = {
+                    "container": container, "expected_env": savant_expected.copy(),
+                    "observed_env": {}, "mismatches": {},
+                    "embedding_interval_applicability": "not_applicable_roi_mode" if roi_mode else "applicable",
                 }
-                if record["mismatches"]:
-                    report["errors"].append(f"Savant environment mismatch for {service}: {record['mismatches']}")
-            except Exception as exc:
-                report["errors"].append(f"Savant environment readback failed for {service}: {exc}")
+                report["savant"][service] = record
+                try:
+                    actual = docker_env(container)
+                    record["observed_env"] = {key: actual.get(key) for key in savant_expected}
+                    record["mismatches"] = {
+                        key: {"expected": value, "observed": actual.get(key)}
+                        for key, value in savant_expected.items()
+                        if not (roi_mode and key == "FACE_EMBEDDING_INFER_INTERVAL")
+                        and actual.get(key) != value
+                    }
+                    if record["mismatches"]:
+                        report["errors"].append(f"Savant environment mismatch for {service}: {record['mismatches']}")
+                except Exception as exc:
+                    report["errors"].append(f"Savant environment readback failed for {service}: {exc}")
+        else:
+            report["savant_readback"] = "not_applicable_savant_not_rebuilt"
         if report["errors"]:
             raise RuntimeReadbackError("; ".join(report["errors"]))
         report["status"] = "passed"
