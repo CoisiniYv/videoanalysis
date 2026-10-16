@@ -144,6 +144,22 @@ def test_common_compose_invocation_deduplicates_extra_profiles(module, cfg):
     assert [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--profile"] == ["rolling-cache", "*"]
 
 
+def test_direct_pressure_forwarders_pin_selected_image(module, cfg, monkeypatch):
+    cfg = replace(cfg, dual_shard_same_gpu=True)
+    monkeypatch.setenv(
+        "PRESSURE_FORWARDER_IMAGE",
+        "video-analytics-midterm-analysis-forwarder:budget-7ea424f",
+    )
+    override = module.write_dual_shard_same_gpu_compose_override(cfg)
+    document = yaml.safe_load(override.read_text(encoding="utf-8"))
+    assert document["services"]["replay-raw-fanout-a"]["image"] == (
+        "video-analytics-midterm-analysis-forwarder:budget-7ea424f"
+    )
+    assert document["services"]["replay-raw-fanout-b"]["image"] == (
+        "video-analytics-midterm-analysis-forwarder:budget-7ea424f"
+    )
+
+
 def test_preflight_without_storage_override_keeps_shared_pressure_stack(module, cfg):
     cfg = replace(cfg, preflight_without_storage_override=True)
     paths = module.compose_config_paths(cfg)

@@ -108,6 +108,7 @@ SOURCE_ADAPTER_SITECUSTOMIZE = (
 DUAL_SHARD_PROFILE = "dual-4090-two-source"
 CUDA_MPS_CONTAINER = "video-analytics-midterm-cuda-mps-pressure"
 CUDA_MPS_IMAGE_DEFAULT = "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
+PRESSURE_FORWARDER_IMAGE_DEFAULT = "video-analytics-midterm-analysis-forwarder:latest"
 CUDA_MPS_RUNTIME_ROOT = Path("/tmp/video-analytics-mps-pressure")
 DUAL_SHARD_SERVICES = [
     "savant-a",
@@ -206,6 +207,14 @@ ADAFACE_FORWARDER_METRICS = {
 
 class ComposeOverrideList(list):
     """Sequence that replaces, rather than merges, a Compose base value."""
+
+
+def pressure_forwarder_image() -> str:
+    """Return the image explicitly selected for pressure-only forwarders."""
+    return (
+        os.environ.get("PRESSURE_FORWARDER_IMAGE", PRESSURE_FORWARDER_IMAGE_DEFAULT).strip()
+        or PRESSURE_FORWARDER_IMAGE_DEFAULT
+    )
 
 
 def _represent_compose_override_list(
@@ -3980,6 +3989,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
         for shard in ("a", "b"):
             service = f"replay-raw-fanout-{shard}"
             doc["services"][service] = {
+                "image": pressure_forwarder_image(),
                 "depends_on": ComposeOverrideList([f"savant-{shard}"]),
                 "environment": {
                     "FORWARDER_OUT_ENDPOINT": (
@@ -4028,7 +4038,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
         }
     if cfg.adaface_decoupled:
         central_module = str(write_central_adaface_module(cfg))
-        forwarder_image = "video-analytics-midterm-analysis-forwarder:latest"
+        forwarder_image = pressure_forwarder_image()
         for shard in ("a", "b"):
             service = f"adaface-forwarder-{shard}"
             central_service = (
