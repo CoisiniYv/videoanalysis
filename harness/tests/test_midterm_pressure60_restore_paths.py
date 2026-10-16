@@ -144,4 +144,3 @@ def test_blocked_active_evidence_restores_cpu_isolation_before_exit(tmp_path):
     names = [name for name, _ in calls]
     assert "restore_worker_cpu_isolation" in names
     assert names.index("restore_worker_cpu_isolation") > names.index("apply_worker_cpu_isolation")
-
