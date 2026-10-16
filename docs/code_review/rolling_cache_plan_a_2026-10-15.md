@@ -182,6 +182,7 @@ curl --noproxy '*' -fsS -X POST http://127.0.0.1:8090/api/v1/runtime/topology-co
 3. 采集两个 sink 后续 30 分钟 `segment published`，按和修复前相同解析和 P50/P95 分位算法计算 `publication_queue_residence_ms`、`publish_total_ms`，另做时间分桶判断是否增长；必须有真实发布样本。只有 ready/healthy 而没有样本不能判通过。暂无业务发布时记“未核实”，不制造压测流量。
 4. 在用户另行确认的真实摄像头/自然新事件上，查询新 evidence_tasks 的 source_id、task_type、materialization_status、时间戳与证据路径，确认图片和视频按所需类型生成且可访问；必要时只读检查文件/HTTP GET。当前没有启用源，因此现状下无法完成这一业务验证，不能把空任务集写作通过。启用摄像头或主动制造测试事件需要纳入维护授权。
 5. 将源 ID、保留期、epoch、MW 并发、CPU 绑定和其他正式服务配置变化逐项对照白名单；本方案不顺带清理历史压测环境值。其业务合理性需另行决策。
+6. 路线二的已批准漂移必须写入维护窗口结果：`savant-a`、`savant-b`、`replay-raw-fanout-a`、`replay-raw-fanout-b` 和 `adaface-roi-worker` 在 A 轮结束后只停止，不重建；它们会保持快照中允许的压测配置，并在报告中标为 `approved_known_drift`。这些 exited 容器不得直接执行 `docker start`，否则会再次运行压测配置；后续需要正式 Compose（以及届时获批的 operator/storage override）重建并做完整差异核验。该事项不等于本轮清理 10-13 残留，也不允许删除数据或镜像。
 
 ## 8. 已确认 / 推断 / 未核实与下一步
 
