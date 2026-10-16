@@ -1348,10 +1348,25 @@ def _readonly_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def perform_storage_preflight(cfg: PressureConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     from scripts.runtime.rolling_cache_storage_preflight import rolling_cache_storage_preflight
 
-    return rolling_cache_storage_preflight(
-        cfg, compose_base_args=_compose_base_args(cfg, pressure_storage=True), run_command=_readonly_command,
-        retention_s=pressure_rolling_cache_retention_seconds(cfg),
-    )
+    # Compose uses the process environment to resolve the same operating-point
+    # variables that the subsequent `up` call receives.  Render the preflight
+    # with that exact overlay so a request such as face interval 3 is checked
+    # against the config that will actually be applied, rather than the value
+    # left in the formal env file.
+    updates = _compose_operating_point_updates(cfg)
+    previous = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
+    try:
+        return rolling_cache_storage_preflight(
+            cfg, compose_base_args=_compose_base_args(cfg, pressure_storage=True), run_command=_readonly_command,
+            retention_s=pressure_rolling_cache_retention_seconds(cfg),
+        )
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def perform_runtime_preflight_readback(
@@ -3406,8 +3421,7 @@ def _compose_base_args(
     )
 
 
-def set_compose_operating_point(cfg: PressureConfig) -> None:
-    env = os.environ.copy()
+def _compose_operating_point_updates(cfg: PressureConfig) -> dict[str, str]:
     updates = {
         "BATCH_SIZE": str(cfg.batch_size),
         "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
@@ -3425,9 +3439,16 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
         "FRAME_ANNOTATION_STREAM_MODE": "dual",
         "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
     }
-    services = ["analysis-forwarder", "savant-security"]
     if cfg.forwarder_null_sink:
         updates["FORWARDER_OUT_ENDPOINT"] = "null://pressure"
+    return updates
+
+
+def set_compose_operating_point(cfg: PressureConfig) -> None:
+    env = os.environ.copy()
+    updates = _compose_operating_point_updates(cfg)
+    services = ["analysis-forwarder", "savant-security"]
+    if cfg.forwarder_null_sink:
         services = ["analysis-forwarder"]
     env.update(updates)
     run(

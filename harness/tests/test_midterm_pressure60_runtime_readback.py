@@ -254,6 +254,29 @@ def test_rendered_pressure_config_validation_does_not_read_stale_containers(tmp_
     assert report["code"]["status"] == "unknown"
 
 
+def test_rendered_single_pressure_config_uses_compose_savant_security_service(tmp_path):
+    module = _load()
+    cfg = _cfg(dual_shard_same_gpu=False, dual_shard_api=False)
+    services = {
+        "analysis-forwarder": {"environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "2048",
+        }},
+        "savant-security": {"environment": {
+            "FACE_INFER_INTERVAL": "3",
+            "FACE_EMBEDDING_INFER_INTERVAL": "3",
+            "SAVANT_MODULE_FILE": "module.yml",
+            "FACE_ROI_EXPORT_ENABLED": "false",
+            "FACE_OBSERVATION_EXPORT_ENABLED": "true",
+            "ADAFACE_INPUT_OBJECT": "yolov8_face.face",
+        }},
+    }
+    report = module.validate_rendered_pressure_config(cfg, {"services": services})
+    assert report["status"] == "passed"
+    assert set(report["savant"]) == {"savant-security"}
+
+
 def test_rendered_pressure_config_validation_fails_on_request_drift(tmp_path):
     module = _load()
     cfg = _cfg(artifact_dir=tmp_path)

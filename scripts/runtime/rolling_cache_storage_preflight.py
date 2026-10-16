@@ -97,7 +97,7 @@ def _config_summary(config: dict[str, Any], sources: dict[str, Any]) -> dict[str
     for service, value in (config.get("services") or {}).items():
         if service.startswith(("analysis-forwarder", "replay-raw-fanout")):
             keys = ("FORWARDER_MAX_QUEUE_AGE_MS", "FORWARDER_STRICT_FPS_BUDGET", "FORWARDER_QUEUE_MAX_SIZE")
-        elif service in {"savant", "savant-a", "savant-b"}:
+        elif service in {"savant", "savant-security", "savant-a", "savant-b"}:
             keys = ("FACE_INFER_INTERVAL", "FACE_EMBEDDING_INFER_INTERVAL")
         else:
             continue

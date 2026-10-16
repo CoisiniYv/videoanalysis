@@ -37,6 +37,11 @@ def runtime_readback_services(cfg: Any) -> dict[str, Any]:
         "mode": "direct_rolling_cache" if direct else "dual" if dual else "single",
         "forwarders": forwarders,
         "savant": ["savant-a", "savant-b"] if dual else ["savant"],
+        # Compose calls the single inference service ``savant-security`` while
+        # its explicit container name (and runtime readback identity) remains
+        # ``video-analytics-midterm-savant``. Keep both namespaces explicit so
+        # rendered-config checks do not look up a non-existent service key.
+        "compose_savant": ["savant-a", "savant-b"] if dual else ["savant-security"],
     }
 
 
@@ -129,7 +134,7 @@ def validate_rendered_pressure_config(cfg: Any, config: Mapping[str, Any]) -> di
         "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
         "SAVANT_MODULE_FILE": expected_module,
     }
-    for service in selection["savant"]:
+    for service in selection["compose_savant"]:
         environment = environment_for(service)
         observed = {key: _env_string(environment[key]) if key in environment else None
                     for key in expected_savant}
@@ -153,7 +158,7 @@ def validate_rendered_pressure_config(cfg: Any, config: Mapping[str, Any]) -> di
         "FACE_OBSERVATION_EXPORT_ENABLED": "false" if cfg.adaface_roi_redis else "true",
         "ADAFACE_INPUT_OBJECT": "disabled.face" if cfg.adaface_roi_redis else "yolov8_face.face",
     }
-    for service in selection["savant"]:
+    for service in selection["compose_savant"]:
         environment = environment_for(service)
         observed = {key: _env_string(environment[key]) if key in environment else None
                     for key in ROI_ENV_KEYS}
