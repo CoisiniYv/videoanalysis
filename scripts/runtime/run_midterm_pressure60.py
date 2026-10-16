@@ -1648,7 +1648,7 @@ def _prepare_pressure_run(argv: list[str]) -> tuple[argparse.Namespace, Pressure
         rtsp_republish_output_base = (
             f"rtsp://{local_rtsp_gateway}:"
             f"{max(1, int(args.rtsp_republish_local_server_host_port))}"
-            "/pressure/{run_id}/{source_id}"
+            f"/pressure/{run_id}/{{source_id}}"
         )
     cfg = PressureConfig(
         run_id=run_id,

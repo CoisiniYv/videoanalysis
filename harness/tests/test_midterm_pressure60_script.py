@@ -804,6 +804,32 @@ def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
     assert "--rtsp-republish-output-base" not in output
 
 
+def test_local_rtsp_server_config_keeps_source_id_template(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "docker_network_gateway", lambda _network: "172.18.0.1")
+
+    _args, cfg = module._prepare_pressure_run(
+        [
+            "--run-id",
+            "fixed-input-local-server",
+            "--artifact-root",
+            str(tmp_path),
+            "--rtsp-republish-local-server",
+            "--rtsp-republish-input-uri",
+            "/tmp/fixed-input.mp4",
+        ]
+    )
+
+    assert cfg.rtsp_republish_output_base == (
+        "rtsp://172.18.0.1:18554/pressure/fixed-input-local-server/{source_id}"
+    )
+    assert module.pressure_rtsp_uri(
+        cfg,
+        index=3,
+        source_id="fixed-input-local-server_03",
+    ) == "rtsp://172.18.0.1:18554/pressure/fixed-input-local-server/fixed-input-local-server_03"
+
+
 def test_rtsp_republish_input_identity_hashes_fixed_local_fixture(
     tmp_path: Path,
 ) -> None:
