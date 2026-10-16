@@ -145,11 +145,11 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 阶段 0 最新提交为 `417d45827224a5d427b702506cf1072d5d6ffdda`，author/committer 均为 `2026-10-15T22:29:49+09:00`。含用户要求的历史脚本差异、1,225 项视频调度假设及前次修复授权。阶段 1 初始实现提交为 `fc77792dba21c0a67fbe8e3c446bf7512dd5f21b`，author/committer 均为 `2026-10-15T22:54:15+09:00`；本轮 Opus 阻断项修复提交为 `a16f926ac7f164b3760004faa1d267124c858413`，author/committer 均为 `2026-10-17T00:40:24+09:00`。
 
-本轮修复已按 Seoul 时间提交；推送完成后在此记录推送开始/完成和 `ls-remote` SHA。审查通过前不进入阶段 2。
+本轮修复已按 Seoul 时间提交。阶段 1 分支推送开始于 `2026-10-17T00:44:47+09:00`，客户端完成于 `2026-10-17T00:45:23+09:00`；`git ls-remote` 核验远端 `codex/rolling-cache-storage-20261015` 为 `0d850cb1df9332ae960a78168245e8a22859fc02`。完成时刻是客户端观察时刻，不是 GitHub 服务端接收时间。审查通过前不进入阶段 2。
 
 最初三次推送失败：20:23:31 KST 开始的连接尝试失败；20:26:06 KST 的 HTTP/1.1 尝试超时；20:28:12 KST 经本机代理连接到 GitHub 后认证失败。前两次完成时刻没有精确采集。用户随后说明已在本机登录，核实 `/opt/homebrew/bin/gh` 的 CoisiniYv 认证恢复有效。
 
-已成功推送阶段 0 的 `ba8f262` 至 [GitHub 分支](https://github.com/CoisiniYv/videoanalysis/tree/CZray/pressure60-allalg-review-20261014)：push 开始 `2026-10-15T21:12:30+09:00`（原始 `2026-10-15 12:12:30 UTC`），客户端成功完成的确认时刻 `2026-10-15T21:13:07+09:00`（原始 `2026-10-15 12:13:07 UTC`）。最新 `417d458` push 开始 `22:32:14+09:00`，成功完成确认于 `22:33:12+09:00`，随后 `ls-remote` 核验远端 SHA 一致。开始时间来自 KST date 输出（原格式 offset 显示异常，时分秒有效）；完成是客户端观察时刻，不是精确的服务端接收时间。阶段 1 因新的全量 harness 停止条件未提交/推送，尚未交 Opus 审查，未进入阶段 2。
+已成功推送阶段 0 的 `ba8f262` 至 [GitHub 分支](https://github.com/CoisiniYv/videoanalysis/tree/CZray/pressure60-allalg-review-20261014)：push 开始 `2026-10-15T21:12:30+09:00`（原始 `2026-10-15 12:12:30 UTC`），客户端成功完成的确认时刻 `2026-10-15T21:13:07+09:00`（原始 `2026-10-15 12:13:07 UTC`）。最新 `417d458` push 开始 `22:32:14+09:00`，成功完成确认于 `22:33:12+09:00`，随后 `ls-remote` 核验远端 SHA 一致。阶段 1 修复已推送到 [GitHub 分支](https://github.com/CoisiniYv/videoanalysis/tree/codex/rolling-cache-storage-guard-20261015)，远端 SHA 已在上一段记录；开始时间来自 KST date 输出，完成是客户端观察时刻，不是精确的服务端接收时间。阶段 1 已交审请求，未进入阶段 2。
 
 ## 非目标、回滚与风险
 
