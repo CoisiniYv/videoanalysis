@@ -7,13 +7,10 @@ from typing import Any, Mapping, Sequence
 
 
 def is_pressure_source(value: str) -> bool:
-    return value.startswith((
-        "pressure60",
-        "pressure40",
-        "pressure_",
-        "forwarder60_null_",
-        "rc",
-    ))
+    # Pressure source ids are generated with a run-family prefix followed by
+    # an index.  Keep the boundary explicit so formal ids such as
+    # ``rcam_front`` cannot be mistaken for a pressure source.
+    return bool(re.match(r"^(?:rc\d+_|pressure\d*_|forwarder60_null_)", str(value or "")))
 
 
 def is_pressure_camera(camera: Mapping[str, Any]) -> bool:

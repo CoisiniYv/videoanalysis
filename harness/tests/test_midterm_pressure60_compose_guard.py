@@ -378,7 +378,7 @@ def test_dual_runtime_snapshot_captures_env_image_mounts_labels_and_state(module
     assert (cfg.artifact_dir / "dual_shard_runtime_before.json").exists()
 
 
-def test_dual_runtime_restore_uses_formal_operator_storage_and_snapshot_env(
+def test_dual_runtime_restore_records_approved_drift_without_recreating(
     module, cfg, tmp_path, monkeypatch
 ):
     formal = tmp_path / "formal" / "infra"
@@ -418,12 +418,7 @@ def test_dual_runtime_restore_uses_formal_operator_storage_and_snapshot_env(
         },
     }
     commands = []
-    monkeypatch.setattr(
-        module,
-        "run",
-        lambda command, *args, **kwargs: commands.append(command)
-        or subprocess.CompletedProcess(command, 0, ""),
-    )
+    monkeypatch.setattr(module, "run", lambda command, *args, **kwargs: commands.append(command))
     monkeypatch.setattr(
         module,
         "inspect_container",
@@ -434,25 +429,11 @@ def test_dual_runtime_restore_uses_formal_operator_storage_and_snapshot_env(
         ),
     )
     result = module.restore_dual_shard_runtime(cfg, snapshot)
-    assert result["status"] == "passed"
-    assert len(commands) == 2
-    stopped, running = commands
-    assert "--no-start" in stopped and "-d" not in stopped
-    assert "-d" in running and "--no-start" not in running
-    for command in commands:
-        files = _compose_files(command)
-        assert files == [
-            str(compose.resolve()),
-            str((formal / "midterm-storage.override.yml").resolve()),
-            str((formal / "operator-dual-runtime.override.yml").resolve()),
-            str(cfg.artifact_dir / "compose_restore_dual_shard_runtime.environment.override.yml"),
-        ]
-        assert "--profile" in command
-        assert "operator-dual-runtime" in command
-    override = yaml.safe_load(Path(_compose_files(commands[0])[-1]).read_text())
-    assert override["services"]["savant-a"]["environment"]["LITERAL"] == "raw$${VALUE}"
-    assert set(result["recreated_stopped"]) == set(services) - {"savant-a"}
-    assert result["restarted_running"] == ["savant-a"]
+    assert result["status"] == "unchanged"
+    assert result["recreated"] is False
+    assert result["approved_known_drift"] is False
+    assert commands == []
+    assert result["differences"] == {}
 
 
 def test_dual_runtime_snapshot_records_absent_decoupled_extras_without_recreating_them(

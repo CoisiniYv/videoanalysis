@@ -11,6 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -847,6 +848,8 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
 
         def execute(self, query, params):
             self.calls.append((query, params))
+            if query.startswith("SELECT enabled"):
+                return type("Result", (), {"fetchone": lambda self: {"enabled": True}})()
 
     conn = FakeConn()
     module.restore_cameras(
@@ -856,6 +859,7 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
             {
                 "id": "old-pressure",
                 "source_id": "rc400_rawtap_fix_20260706T173642Z_00",
+                "site_id": "formal",
                 "enabled": True,
             },
             {
@@ -871,7 +875,13 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
         (
             "UPDATE cameras SET enabled=%s, updated_at=now() WHERE id=%s",
             (True, "lab-camera"),
-        )
+        ),
+        (
+            "UPDATE cameras SET enabled=%s, updated_at=now() WHERE id=%s",
+            (True, "old-pressure"),
+        ),
+        ("SELECT enabled FROM cameras WHERE id=%s", ("lab-camera",)),
+        ("SELECT enabled FROM cameras WHERE id=%s", ("old-pressure",)),
     ]
 
 
@@ -1346,6 +1356,16 @@ def test_pressure_camera_insert_uses_per_algorithm_alert_cooldown() -> None:
     assert '"cooldown_scope": "algorithm"' in source
     assert '"store_suppressed_events": True' in source
     assert "--pressure-algorithm-cooldown-s" in source
+
+
+def test_cooldown_summary_uses_only_requested_behavior_event_types() -> None:
+    module = _load_module()
+    assert module.pressure_cooldown_event_types(
+        SimpleNamespace(behavior_rules=())
+    ) == ("intrusion", "watchlist_hit")
+    assert module.pressure_cooldown_event_types(
+        SimpleNamespace(behavior_rules=("fall", "crowd_gathering", "chasing"))
+    ) == ("intrusion", "watchlist_hit", "fall", "crowd_gathering", "chasing")
 
 
 def test_rolling_cache_pressure_clamps_coverage_parent_duration() -> None:
@@ -6432,6 +6452,7 @@ def test_postfill_prune_keeps_bundles_and_trajectory_observations(
     assert ingest_calls == [
         {
             "cooldown_s": cfg.pressure_algorithm_cooldown_s,
+            "event_types": ("intrusion", "watchlist_hit"),
             "sampling_start_event_ts_ms": cfg.pressure_sampling_start_event_ts_ms,
             "sampling_end_event_ts_ms": int(
                 datetime.fromisoformat(cutoff["created_at_cutoff"]).timestamp() * 1000

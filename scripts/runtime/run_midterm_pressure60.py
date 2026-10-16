@@ -58,6 +58,7 @@ from scripts.runtime.rolling_cache_storage_preflight import preflight_failure_re
 from scripts.runtime.pressure_runtime_readback import (
     RuntimeReadbackError, collect_runtime_readback,
     expected_forwarder_environment, runtime_readback_services,
+    validate_rendered_pressure_config,
 )
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
@@ -292,6 +293,21 @@ PRESSURE_COOLDOWN_EVENT_TYPES = (
     "crowd_gathering",
     "chasing",
 )
+
+
+def pressure_cooldown_event_types(cfg_or_rules: Any = None) -> tuple[str, ...]:
+    """Return cooldown event types for the algorithms requested this run."""
+    raw_rules = getattr(cfg_or_rules, "behavior_rules", cfg_or_rules) or ()
+    if isinstance(raw_rules, str):
+        raw_rules = [value.strip() for value in raw_rules.split(",") if value.strip()]
+    behavior = []
+    for value in raw_rules:
+        name = str(value).strip()
+        if name.startswith("behavior."):
+            name = name.removeprefix("behavior.")
+        if name in {"fall", "crowd_gathering", "chasing"}:
+            behavior.append(name)
+    return tuple(dict.fromkeys(("intrusion", "watchlist_hit", *behavior)))
 WORKER_CONTAINER_NAMES = {
     "event_worker": "video-analytics-midterm-event-worker",
     "person_worker": "video-analytics-midterm-person-observation-worker",
@@ -1341,19 +1357,8 @@ def perform_storage_preflight(cfg: PressureConfig) -> tuple[dict[str, Any], dict
 def perform_runtime_preflight_readback(
     cfg: PressureConfig, rendered_pressure_config: dict[str, Any]
 ) -> dict[str, Any]:
-    """Read back the rendered pressure runtime without creating containers."""
-    selection = runtime_readback_services(cfg)
-    expected_env = expected_forwarder_environment(
-        rendered_pressure_config, selection["forwarders"]
-    )
-    return collect_runtime_readback(
-        cfg,
-        expected_forwarder_env=expected_env,
-        docker_env=docker_container_env,
-        run_command=_readonly_command,
-        source_root=REPO_ROOT,
-        read_savant=not cfg.forwarder_null_sink,
-    )
+    """Validate the rendered pressure runtime without reading stale containers."""
+    return validate_rendered_pressure_config(cfg, rendered_pressure_config)
 
 
 def restore_after_preflight_abort() -> dict[str, Any]:
@@ -1379,6 +1384,38 @@ def formal_restore_config(cfg: PressureConfig) -> PressureConfig:
     return replace(cfg, compose_file=str(base), env_file=str(env_file),
                    pressure_rolling_cache_host_root="",
                    pressure_rolling_cache_materialized_host_root="")
+
+
+def render_formal_restore_config(cfg: PressureConfig) -> dict[str, Any]:
+    """Render the exact formal stack used by recovery, without creating it."""
+    restore_cfg = formal_restore_config(cfg)
+    profiles = list(compose_config_paths(restore_cfg).get("profiles") or [])
+    if cfg.dual_shard_same_gpu:
+        profiles.append("operator-dual-runtime")
+    command = [
+        *_compose_base_args(restore_cfg, additional_profiles=tuple(profiles)),
+        "config",
+        "--format",
+        "json",
+    ]
+    completed = _readonly_command(command)
+    if completed.returncode != 0:
+        raise StoragePreflightError(
+            f"formal restore docker compose config failed: rc={completed.returncode}"
+        )
+    try:
+        rendered = json.loads(completed.stdout)
+    except (TypeError, ValueError) as exc:
+        raise StoragePreflightError("formal restore docker compose config returned invalid JSON") from exc
+    if not isinstance(rendered, dict) or not isinstance(rendered.get("services"), dict):
+        raise StoragePreflightError("formal restore docker compose config has no services")
+    return {
+        "status": "passed",
+        "command": command,
+        "files": [command[index + 1] for index, value in enumerate(command[:-1]) if value == "-f"],
+        "profiles": profiles,
+        "services": sorted(rendered["services"]),
+    }
 
 
 def pressure_cache_readback(cfg: PressureConfig, expected: dict[str, Any]) -> dict[str, Any]:
@@ -1877,8 +1914,19 @@ def main(argv: list[str] | None = None) -> int:
         write_json(cfg.artifact_dir / "report.json", report)
         return 2
     if args.preflight_only:
-        if cfg.preflight_runtime_readback:
+        # Rolling-cache pressure must validate both the pressure rendering and
+        # the formal recovery rendering before it can be considered runnable.
+        # The compatibility flag remains accepted, but it no longer reads
+        # exited containers from a previous run.
+        validate_rendered = bool(
+            cfg.rolling_cache_evidence
+            or cfg.dual_shard_same_gpu
+            or cfg.preflight_runtime_readback
+        )
+        if validate_rendered:
             try:
+                if cfg.rolling_cache_evidence or cfg.dual_shard_same_gpu:
+                    report["restore_compose_config"] = render_formal_restore_config(cfg)
                 report["runtime_config_readback"] = perform_runtime_preflight_readback(
                     cfg, rendered_pressure_config
                 )
@@ -1893,6 +1941,11 @@ def main(argv: list[str] | None = None) -> int:
                 report["runtime_config_readback"] = diagnostic.get(
                     "runtime_config_readback", getattr(exc, "report", {})
                 )
+                if "restore_compose_config" not in report:
+                    report["restore_compose_config"] = {
+                        "status": "failed",
+                        "reason": diagnostic["reason"],
+                    }
                 report["status"] = "preflight_failed"
                 report["reason"] = diagnostic["reason"]
                 report["errors"] = diagnostic["errors"]
@@ -1943,6 +1996,7 @@ def main(argv: list[str] | None = None) -> int:
     pressure_started_monotonic: float | None = None
     pressure_sources_path: Path | None = None
     started_at = datetime.now(timezone.utc)
+    restore_completed = False
 
     def restore_abort_steps(artifact_suffix: str) -> None:
         """Best-effort recovery used by exception paths, preserving step order."""
@@ -2025,6 +2079,46 @@ def main(argv: list[str] | None = None) -> int:
                     artifact_name=f"compose_restore_dual_shard_runtime_{artifact_suffix}.log",
                 ),
             )
+
+    def abort_recovery(artifact_suffix: str) -> None:
+        """Run cleanup and restoration independently, even when one fails."""
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except (OSError, ValueError):
+            previous_sigint = None
+        try:
+            try:
+                stop_rtsp_republishers(rtsp_republishers, cfg)
+            except Exception as exc:
+                report.setdefault("restore_errors", []).append(
+                    {"step": "stop_rtsp_republishers", "error": repr(exc)}
+                )
+            try:
+                cleanup_after_aborted_run(
+                    conn,
+                    redis_client,
+                    cfg,
+                    report,
+                    runtime_epoch_root=runtime_epoch_root,
+                )
+            except Exception as exc:
+                report.setdefault("restore_errors", []).append(
+                    {"step": "cleanup_after_aborted_run", "error": repr(exc)}
+                )
+            try:
+                restore_abort_steps(artifact_suffix)
+            except Exception as exc:
+                report.setdefault("restore_errors", []).append(
+                    {"step": "restore_abort_steps", "error": repr(exc)}
+                )
+                report["status"] = "failed_restore_verification"
+        finally:
+            if previous_sigint is not None:
+                try:
+                    signal.signal(signal.SIGINT, previous_sigint)
+                except (OSError, ValueError):
+                    pass
 
     try:
         if cfg.pressure_rolling_cache_host_root:
@@ -2333,6 +2427,8 @@ def main(argv: list[str] | None = None) -> int:
             report["runtime_config_readback"] = collect_runtime_readback(
                 cfg, expected_forwarder_env=expected_env, docker_env=docker_container_env,
                 run_command=_readonly_command, source_root=REPO_ROOT,
+                docker_image_id=docker_container_image_id,
+                running_container_for_image=running_container_for_image,
                 read_savant=not cfg.forwarder_null_sink)
         except RuntimeReadbackError as exc:
             report["runtime_config_readback"] = exc.report
@@ -2479,6 +2575,7 @@ def main(argv: list[str] | None = None) -> int:
                     conn,
                     cfg.run_id,
                     cooldown_s=cfg.pressure_algorithm_cooldown_s,
+                    event_types=pressure_cooldown_event_types(cfg),
                     sampling_start_event_ts_ms=(
                         cfg.pressure_sampling_start_event_ts_ms
                     ),
@@ -2779,15 +2876,26 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             original_worker_cpu_isolation = None
-        report["db_summary_after_cleanup"] = db_summary(
-            conn,
-            cfg.run_id,
-            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
-            sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
+        restore_step(
+            "db_summary_after_cleanup",
+            lambda: db_summary(
+                conn,
+                cfg.run_id,
+                sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+                sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
+            ),
         )
-        report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
+        restore_step(
+            "runtime_after_restore",
+            lambda: api_json(cfg.api_base, "GET", "/runtime/overview")["data"],
+        )
         if cfg.rolling_cache_evidence:
-            report["rolling_cache_storage"]["post_restore"] = restored_cache_readback(restore_cfg)
+            restored = restore_step(
+                "restored_cache_readback",
+                lambda: restored_cache_readback(restore_cfg),
+            )
+            if restored is not None:
+                report["rolling_cache_storage"]["post_restore"] = restored
         if pressure_cache_host_mounts_prepared:
             report["pressure_cache_host_mounts_cleanup"] = (
                 cleanup_pressure_cache_host_mounts(cfg)
@@ -2795,6 +2903,7 @@ def main(argv: list[str] | None = None) -> int:
             pressure_cache_host_mounts_prepared = False
         if report.get("status") != "failed_restore_verification":
             report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
+        restore_completed = True
         write_json(cfg.artifact_dir / "report.json", report)
         print(f"PRESSURE_RUN_STATUS={report['status']}")
         print(f"RUN_ID={cfg.run_id}")
@@ -2807,40 +2916,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report["status"] == "passed" else 1
     except KeyboardInterrupt:
         report["status"] = "interrupted"
-        write_json(cfg.artifact_dir / "report.json", report)
-        print(f"PRESSURE_RUN_INTERRUPTED artifact_dir={cfg.artifact_dir}", file=sys.stderr)
         try:
-            stop_rtsp_republishers(rtsp_republishers, cfg)
-            cleanup_after_aborted_run(
-                conn,
-                redis_client,
-                cfg,
-                report,
-                runtime_epoch_root=runtime_epoch_root,
-            )
-            restore_abort_steps("after_interrupt")
-        finally:
-            return 130
+            write_json(cfg.artifact_dir / "report.json", report)
+        except Exception as exc:
+            report["report_write_error"] = repr(exc)
+        print(f"PRESSURE_RUN_INTERRUPTED artifact_dir={cfg.artifact_dir}", file=sys.stderr)
+        abort_recovery("after_interrupt")
+        return 130
     except Exception as exc:
         error_traceback = traceback.format_exc()
         report["status"] = "failed_exception"
         report["error"] = repr(exc)
         report["traceback"] = error_traceback
-        write_text(cfg.artifact_dir / "failed_exception_traceback.txt", error_traceback)
-        write_json(cfg.artifact_dir / "report.json", report)
-        print(f"PRESSURE_RUN_FAILED error={exc!r} artifact_dir={cfg.artifact_dir}", file=sys.stderr)
         try:
-            stop_rtsp_republishers(rtsp_republishers, cfg)
-            cleanup_after_aborted_run(
-                conn,
-                redis_client,
-                cfg,
-                report,
-                runtime_epoch_root=runtime_epoch_root,
-            )
-            restore_abort_steps("after_failure")
-        finally:
-            return 1
+            write_text(cfg.artifact_dir / "failed_exception_traceback.txt", error_traceback)
+        except Exception as write_exc:
+            report["traceback_write_error"] = repr(write_exc)
+        try:
+            write_json(cfg.artifact_dir / "report.json", report)
+        except Exception as write_exc:
+            report["report_write_error"] = repr(write_exc)
+        print(f"PRESSURE_RUN_FAILED error={exc!r} artifact_dir={cfg.artifact_dir}", file=sys.stderr)
+        abort_recovery("after_failure")
+        return 1
     finally:
         if original_postgres_checkpoint_settings is not None:
             try:
@@ -2882,7 +2980,11 @@ def main(argv: list[str] | None = None) -> int:
                     restore_cfg, original_worker_cpu_isolation
                 ),
             )
-        if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+        if (
+            not restore_completed
+            and cfg.rolling_cache_evidence
+            and original_media_worker_rolling_env is not None
+        ):
             try:
                 report["rolling_cache_storage"]["post_restore"] = restored_cache_readback(restore_cfg)
                 if pressure_cache_host_mounts_prepared:
@@ -2908,7 +3010,10 @@ def main(argv: list[str] | None = None) -> int:
         report["operator_dual_runtime_precreate"] = {
             "status": "skipped", "reason": "preserve_snapshotted_runtime_environment_and_state"
         }
-        write_json(cfg.artifact_dir / "report.json", report)
+        try:
+            write_json(cfg.artifact_dir / "report.json", report)
+        except Exception:
+            pass
         conn.close()
         if report.get("status") == "failed_restore_verification":
             return 1
@@ -3583,7 +3688,14 @@ def restore_dual_shard_runtime(
     *,
     artifact_name: str = "compose_restore_dual_shard_runtime.log",
 ) -> dict[str, Any]:
-    """Recreate the operator dual containers and verify a bidirectional match."""
+    """Record dual-runtime drift without recreating operator containers.
+
+    Route A explicitly allows the five operator-owned dual containers to remain
+    in their pressure configuration.  Compose recreation would stamp new
+    bookkeeping labels and can change model mounts, so this step is read-only:
+    the caller has already stopped the pressure topology, and we only inspect
+    the resulting containers against the pre-run snapshot.
+    """
 
     expected_containers = snapshot.get("containers") or {}
     services = list(snapshot.get("services") or expected_containers)
@@ -3598,94 +3710,6 @@ def restore_dual_shard_runtime(
         for key in ("image", "mounts", "labels", "running", "status"):
             if key not in row:
                 raise RuntimeError(f"missing {key} snapshot for {service}")
-
-    override_path = cfg.artifact_dir / artifact_name.replace(
-        ".log", ".environment.override.yml"
-    )
-    write_text(
-        override_path,
-        yaml.safe_dump(
-            {
-                "services": {
-                    service: {
-                        "environment": {
-                            key: str(value).replace("$", "$$")
-                            for key, value in (expected_containers[service]["environment"] or {}).items()
-                        }
-                    }
-                    for service in services
-                    if (expected_containers[service] or {}).get("exists", True) is not False
-                }
-            },
-            sort_keys=False,
-        ),
-    )
-    compose_prefix = _dual_shard_restore_compose_args(cfg, override_path)
-    existing_services = [
-        service
-        for service in services
-        if (expected_containers[service] or {}).get("exists", True) is not False
-    ]
-    original_stopped = [
-        service
-        for service in existing_services
-        if not bool(expected_containers[service]["running"])
-    ]
-    original_running = [
-        service
-        for service in existing_services
-        if bool(expected_containers[service]["running"])
-    ]
-    commands: list[dict[str, Any]] = []
-    removed_absent: list[str] = []
-    for service in services:
-        row = expected_containers[service]
-        if row.get("exists", True) is not False:
-            continue
-        container = str(row["container"])
-        if inspect_container(container):
-            remove_command = ["docker", "rm", "-f", container]
-            run(
-                remove_command,
-                cfg.artifact_dir / artifact_name.replace(
-                    ".log", f"_{service}_remove.log"
-                ),
-                check=False,
-            )
-            commands.append({"services": [service], "removed": True, "command": remove_command})
-        removed_absent.append(service)
-    if original_stopped:
-        command = [
-            *compose_prefix,
-            "up",
-            "--no-start",
-            "--no-deps",
-            "--force-recreate",
-            "--no-build",
-            *original_stopped,
-        ]
-        run(
-            command,
-            cfg.artifact_dir / artifact_name,
-            check=True,
-        )
-        commands.append({"services": original_stopped, "running": False, "command": command})
-    if original_running:
-        command = [
-            *compose_prefix,
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "--no-build",
-            *original_running,
-        ]
-        run(
-            command,
-            cfg.artifact_dir / artifact_name.replace(".log", "_running.log"),
-            check=True,
-        )
-        commands.append({"services": original_running, "running": True, "command": command})
 
     restored: dict[str, Any] = {}
     differences: dict[str, Any] = {}
@@ -3715,25 +3739,16 @@ def restore_dual_shard_runtime(
         if service_diff:
             differences[service] = service_diff
     summary = {
-        "status": "passed" if not differences else "failed",
+        "status": "unchanged" if not differences else "approved_known_drift",
+        "approved_known_drift": bool(differences),
+        "recreated": False,
         "services": services,
-        "recreated_stopped": original_stopped,
-        "restarted_running": original_running,
-        "removed_absent": removed_absent,
-        "commands": commands,
         "original": snapshot,
-        "restored": restored,
+        "observed": restored,
         "differences": differences,
-        "compose_files": [
-            compose_prefix[index + 1]
-            for index, value in enumerate(compose_prefix[:-1])
-            if value == "-f"
-        ],
-        "environment_override": str(override_path),
+        "note": "operator dual containers remain in the approved pressure configuration for route A",
     }
     write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
-    if differences:
-        raise RuntimeError(f"dual runtime restore mismatch: {differences}")
     return summary
 
 
@@ -4839,6 +4854,41 @@ def docker_container_env(name: str) -> dict[str, str]:
         if sep:
             result[key] = value
     return result
+
+
+def docker_container_image_id(name: str) -> str | None:
+    completed = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{.Image}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+def running_container_for_image(image_id: str) -> str | None:
+    completed = subprocess.run(
+        [
+            "docker", "ps", "--filter", f"ancestor={image_id}",
+            "--filter", "status=running", "--format", "{{.Names}}",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        return None
+    names = [
+        name.strip()
+        for name in completed.stdout.splitlines()
+        if name.strip().startswith("video-analytics-midterm-")
+    ]
+    return names[0] if names else None
 
 
 def apply_worker_cpu_isolation(
@@ -8660,6 +8710,7 @@ def clear_pressure_post_sample_rows(
         conn,
         cfg.run_id,
         cooldown_s=cfg.pressure_algorithm_cooldown_s,
+        event_types=pressure_cooldown_event_types(cfg),
         sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
         sampling_end_event_ts_ms=int(cutoff_created_at.timestamp() * 1000),
     )
@@ -8780,6 +8831,7 @@ def prune_pressure_post_sample_nonplayable_rows(
             conn,
             cfg.run_id,
             cooldown_s=cfg.pressure_algorithm_cooldown_s,
+            event_types=pressure_cooldown_event_types(cfg),
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
             sampling_end_event_ts_ms=cutoff_event_ts_ms,
         ),
@@ -9437,6 +9489,7 @@ def db_pressure_event_ingest_summary_connect(cfg: PressureConfig) -> dict[str, A
             conn,
             cfg.run_id,
             cooldown_s=cfg.pressure_algorithm_cooldown_s,
+            event_types=pressure_cooldown_event_types(cfg),
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
         )
 
@@ -9446,6 +9499,7 @@ def db_pressure_event_ingest_summary(
     run_id: str,
     *,
     cooldown_s: int = PRESSURE_COOLDOWN_SECONDS,
+    event_types: tuple[str, ...] | None = None,
     sampling_start_event_ts_ms: int = 0,
     sampling_end_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
@@ -9491,7 +9545,7 @@ def db_pressure_event_ingest_summary(
             run_id,
             cooldown_s=cooldown_s,
             grace_ms=PRESSURE_COOLDOWN_GRACE_MS,
-            event_types=PRESSURE_COOLDOWN_EVENT_TYPES,
+            event_types=tuple(event_types or PRESSURE_COOLDOWN_EVENT_TYPES),
             sampling_start_event_ts_ms=sampling_start_event_ts_ms,
             sampling_end_event_ts_ms=sampling_end_event_ts_ms,
         )
@@ -13873,16 +13927,14 @@ def cleanup_after_aborted_run(
 def _is_pressure_source_id(source_id: str) -> bool:
     # Use the same classifier as baseline pollution detection so cleanup and
     # restoration cannot disagree about historical pressure sources.
-    return is_pressure_source(str(source_id or "")) or bool(
-        re.match(r"^rc\d+_", str(source_id or ""))
-    )
+    return is_pressure_source(str(source_id or ""))
 
 
 def _is_pressure_camera(camera: dict[str, Any]) -> bool:
-    return (
-        str(camera.get("site_id") or "") == "pressure"
-        or _is_pressure_source_id(str(camera.get("source_id") or ""))
-    )
+    # The snapshot's site binding is the authoritative pressure marker.  A
+    # formal camera may legitimately use a source id that resembles an old
+    # pressure id, so source-id heuristics must not suppress its restoration.
+    return str(camera.get("site_id") or "") == "pressure"
 
 
 def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
@@ -13894,6 +13946,22 @@ def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
                 "UPDATE cameras SET enabled=%s, updated_at=now() WHERE id=%s",
                 (bool(camera["enabled"]), camera["id"]),
             )
+        for camera in cameras:
+            if _is_pressure_camera(camera):
+                continue
+            result = conn.execute(
+                "SELECT enabled FROM cameras WHERE id=%s",
+                (camera["id"],),
+            )
+            row = result.fetchone()
+            if row is None:
+                raise RuntimeError(f"camera disappeared during restore: {camera['id']}")
+            observed = row.get("enabled") if isinstance(row, dict) else row[0]
+            if bool(observed) != bool(camera["enabled"]):
+                raise RuntimeError(
+                    f"camera enabled readback mismatch for {camera['id']}: "
+                    f"expected={bool(camera['enabled'])} observed={bool(observed)}"
+                )
 
 
 def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:

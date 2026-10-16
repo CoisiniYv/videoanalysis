@@ -92,6 +92,8 @@ def _fixture(tmp_path: Path, mode: str) -> tuple[list[str], dict[str, str], Path
         "SYSFS", repr(str(sysfs))).replace("MOUNTINFO", repr(mountinfo)).replace("COMPOSE_CRASH", repr(compose_crash))
     (startup / "sitecustomize.py").write_text(startup_source)
 
+    artifact_root = tmp_path / "artifacts"
+    module_path = str((artifact_root / "cli-test/module.pressure.yml").resolve())
     config = {"services": {}}
     for service in ("rolling-cache-sink-a", "rolling-cache-sink-b", "media-worker"):
         config["services"][service] = {"volumes": [
@@ -100,6 +102,21 @@ def _fixture(tmp_path: Path, mode: str) -> tuple[list[str], dict[str, str], Path
     config["services"]["media-worker"]["volumes"].append({
         "type": "bind", "source": virtual + "/materialized", "target": "/media/rolling-cache-materialized",
     })
+    for service in ("replay-raw-fanout-a", "replay-raw-fanout-b"):
+        config["services"][service] = {"environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192",
+        }}
+    for service in ("savant-a", "savant-b"):
+        config["services"][service] = {"environment": {
+            "FACE_INFER_INTERVAL": "7",
+            "FACE_EMBEDDING_INFER_INTERVAL": "7",
+            "SAVANT_MODULE_FILE": module_path,
+            "FACE_ROI_EXPORT_ENABLED": "false",
+            "FACE_OBSERVATION_EXPORT_ENABLED": "true",
+            "ADAFACE_INPUT_OBJECT": "yolov8_face.face",
+        }}
     config_path = tmp_path / "compose.json"
     config_path.write_text(json.dumps(config))
     command_log = tmp_path / "commands.jsonl"
@@ -109,6 +126,12 @@ def _fixture(tmp_path: Path, mode: str) -> tuple[list[str], dict[str, str], Path
         args = sys.argv[1:]
         with open(os.environ['PREFLIGHT_COMMAND_LOG'], 'a') as output:
             output.write(json.dumps(['docker', *args]) + '\\n')
+        if args and args[0] == 'inspect':
+            print(json.dumps([{'Config': {'Labels': {
+                'com.docker.compose.project.working_dir': os.getcwd(),
+                'com.docker.compose.project.config_files': os.path.join(os.getcwd(), 'infra/docker-compose.midterm.yml'),
+            }}}]))
+            raise SystemExit(0)
         if not args or args[0] != 'compose' or args[-3:] != ['config', '--format', 'json']:
             raise SystemExit(93)
         profiles = [args[index + 1] for index, value in enumerate(args[:-1]) if value == '--profile']
@@ -132,7 +155,6 @@ def _fixture(tmp_path: Path, mode: str) -> tuple[list[str], dict[str, str], Path
         else:
             print(json.dumps({} if mode == 'unknown_bitrate' else {'format': {'bit_rate': '8000000'}}))
     ''')
-    artifact_root = tmp_path / "artifacts"
     argv = [sys.executable, str(SCRIPT), "--preflight-only", "--run-id", "cli-test",
             "--artifact-root", str(artifact_root), "--dual-shard-same-gpu", "--rolling-cache-evidence",
             "--streams", "60", "--duration-s", "3600", "--drain-s", "300",
@@ -184,8 +206,30 @@ def test_real_script_preflight_always_writes_result(tmp_path, mode, reason):
     assert "Traceback" not in completed.stderr
     command_log = tmp_path / "commands.jsonl"
     commands = [json.loads(line) for line in command_log.read_text().splitlines()] if command_log.exists() else []
-    assert len([command for command in commands if command[0] == "docker"]) == (0 if mode == "setup_exception" else 1)
-    assert all(command[0] == "ffprobe" or command[-3:] == ["config", "--format", "json"] for command in commands)
+    expected_docker_calls = {
+        # A passing dual-shard preflight renders both the pressure config and
+        # the formal recovery config; the inspect call is the third Docker
+        # invocation.
+        "nvme": 3,
+        # Storage and probe failures happen before recovery rendering.
+        "hdd": 1,
+        "unknown_device": 1,
+        "unknown_bitrate": 1,
+        "compose_failure": 1,
+        "compose_invalid_json": 1,
+        "ffprobe_failure": 1,
+        "ffprobe_invalid_json": 1,
+        "setup_exception": 0,
+    }
+    assert len([command for command in commands if command[0] == "docker"]) == expected_docker_calls[mode]
+    assert all(
+        command[0] == "ffprobe"
+        or (command[0] == "docker" and (
+            (len(command) > 1 and command[1] == "inspect")
+            or command[-3:] == ["config", "--format", "json"]
+        ))
+        for command in commands
+    )
 
 
 def test_storage_override_opt_out_is_pure_only_and_has_no_side_effect(tmp_path):

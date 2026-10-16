@@ -1,0 +1,13 @@
+{
+  "scripts/runtime/run_midterm_pressure60.py": "16eb3c119bbd6d9670fab2100353e7639d2e86ac8f5f54c1c2192f50b672981a",
+  "scripts/runtime/pressure_storage_guard.py": "82af3da8bbe591d1fa143c8d1c306f862d599e243bb43f66009fccdb295bae27",
+  "scripts/runtime/rolling_cache_storage_preflight.py": "9f82db15865e8e1eb9649fe6dbb3f47804b1feb51f4e168ba8020ee029f1d5a4",
+  "scripts/runtime/pressure_runtime_readback.py": "33c86c1c3459936b8437446bb43755d11da886c87e4c6a91c298b3a10eb5a938",
+  "scripts/runtime/pressure_baseline_guard.py": "1ef774725d54a47eecefae3e95eec1fad56ac956e574546e3f5dc6f435abc896",
+  "scripts/tools/parse_video_file_sink_pressure.py": "bcd8ac070af9526bf98ee21ba586391aae54317bc4c73e2c3c658d58787bd21a",
+  "libs/evidence_lifecycle/__init__.py": "6ae7aecd5b19b1cf905074e06baa2b007a8067d3f902b6b94295e8809d6a4d19",
+  "libs/evidence_lifecycle/contract.py": "918ce04d25aa46200c2a10c8805c9062e5944a7ab205e704fde80df89a45bf23",
+  "infra/docker-compose.midterm.yml": "e74ac00aa8d93913c2cbc41cb7e7a7ccdec3e35c48163adef4f3a342261c3a38",
+  "infra/midterm-storage.override.yml": "5194c03f262eec72f4325e86f81926f654d0462a6fbc7b4b6a53ea79c259c499",
+  "infra/env/midterm.env": "247b0f79cb4caaacd1d759d97640e788ed46d61a25d951a3b0e55ed8166602fb"
+}

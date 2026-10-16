@@ -4,13 +4,13 @@
 
 ## 结论与授权
 
-**阶段 1 修复与重验达到交审标准，当前修复待提交推送后交 Opus 审查。** 最新授权后的第 1 轮全量 harness 为 2029 passed / 11 failed / 74 skipped / 1 collection error，失败名单为基线 `98d388c` 的子集，无新增失败或收集错误；新增集合 187 项为 186 passed / 1 skipped / 0 failed / 0 error。当前源码在真实辅助容器上的只读预检正向返回 0、反向返回 2，30 个正式容器前后一致。前次 17 个失败的停止记录和原始证据保留，不以旧轮 11 个失败代替本次重验。未进入阶段 2。
+**阶段 1 修复与路线二收回调整达到交审标准，当前工作树待提交推送后交 Opus 审查。** 本轮冻结环境全量 harness 为 2035 passed / 11 failed / 74 skipped / 1 collection error，失败名单为基线 `98d388c` 的子集，无新增失败或收集错误；完整 JUnit 与集合差异见 `evidence/rolling_cache_phase1_20261015/recheck-r5/`。当前源码在真实辅助容器上的只读预检正向返回 0、反向返回 2，30 个正式容器前后一致，见 `preflight-r5/`。前次 17 个失败的停止记录和原始证据保留，未进入阶段 2。
 
-阶段 1 基于阶段 0 最新提交 `417d45827224a5d427b702506cf1072d5d6ffdda`，分支为 `codex/rolling-cache-storage-guard-20261015`；提交和审查结果见下节记录。代码只修改 `scripts/runtime/` 和 `harness/`，另补本开发文档和规格状态。正式服务、正式 checkout、已有数据和镜像未修改。
+阶段 1 基于阶段 0 最新提交 `417d45827224a5d427b702506cf1072d5d6ffdda`，分支为 `codex/rolling-cache-storage-guard-20261015`；本轮在 `4d98fb5` 工作树上完成路线二调整，提交和审查结果见下节记录。代码只修改 `scripts/runtime/` 和 `harness/`，另补本开发文档和只读证据。正式服务、正式 checkout、已有数据和镜像未修改。
 
 用户已接受当前正式服务的机械盘挂载，并明确越过 T0.3⑤，见 [阶段 0 决策](code_review/rolling_cache_phase0_decision_2026-10-15.md)。阶段 2 每轮恢复的缓存源迁往 NVMe 已预批准；这不是维护窗口批准。60 个历史源、4020 秒保留期和 8090 的 40 路配置保留为已知漂移。
 
-本工作实现 [任务书](midterm_rolling_cache_storage_taskbook_2026-10-14.md) T1.1–T1.5，以及用户追加 T1.6。相关规格：[滚动缓存取证计划](../specs/30_midterm_rolling_cache_evidence_plan.md)。阶段 1 代码已推送，Opus 审查尚未执行，不得进入阶段 2。
+本工作实现 [任务书](midterm_rolling_cache_storage_taskbook_2026-10-14.md) T1.1–T1.5，以及用户追加 T1.6。相关规格：[滚动缓存取证计划](../specs/30_midterm_rolling_cache_evidence_plan.md)。路线二收回后的代码尚未推送，Opus 审查尚未通过，不得进入阶段 2。
 
 ### 最新用户规则（仅阶段 1）
 
@@ -35,9 +35,9 @@ T0.2 已从历史日志恢复部分事件的最后观测重试原文，完整结
 
 `compose_invocation_args` 统一生成绝对 base/env/storage/dual/tmpfs 文件参数及 profile；`_compose_base_args` 委托该函数。预检 config 和实际 sink/MW up 共用该前缀，MW 仅另加 Env overlay。单路使用 `rolling-cache`，双路使用 `dual-4090-two-source` 与 `rolling-cache-dual`。相邻 `midterm-storage.override.yml` 存在即追加；所有 `up` 使用 `--no-build`。压力 tmpfs override 位于 storage override 之后。`run()` 先写入 shell 引号化命令，再执行，失败也保留首行。
 
-正式恢复从 media-worker 的 Compose 标签解析正式 base，验证工作目录、env 和 storage 文件存在；不依赖历史 ART override。恢复配置清空压力根目录。sink 和 media-worker 保存并严格回读完整原始 Env；CPU 恢复保存 Env、镜像和运行状态，失败回滚同样使用正式恢复配置，保留已知漂移。完整 Env 中的 `$` 为 Compose 转义。若无法精确保留原环境，恢复校验失败，不把默认值当原值。
+正式恢复从 media-worker 的 Compose 标签解析正式 base，验证工作目录、env 和 storage 文件存在；不依赖历史 ART override。恢复配置清空压力根目录。sink 和 media-worker 保存并严格回读完整原始 Env；CPU 恢复保存 Env、镜像和运行状态，失败回滚同样使用正式恢复配置，保留已知漂移。完整 Env 中的 `$` 为 Compose 转义。双路 operator 容器按路线二只停止、不重建，只做快照比对并在报告中标为 `approved_known_drift`；Docker API 精确克隆恢复延期到 B 轮前独立任务。
 
-移除主流程结尾无条件预建整套 operator runtime 的调用，避免其在恢复之后再次覆盖快照环境。缓存服务先恢复，随后恢复运行时 API；最终 CPU 恢复后重读正式缓存挂载，通过才清理本轮临时缓存。核验失败保留临时目录并写入恢复错误。
+移除主流程结尾无条件预建整套 operator runtime 的调用，避免其在恢复之后再次覆盖快照环境。缓存服务先恢复，随后恢复运行时 API；最终 CPU 恢复后重读正式缓存挂载，通过才清理本轮临时缓存。核验失败保留临时目录并写入恢复错误。双路 operator 容器的精确 Env/Image/Mount/Label 克隆与双向验证保留为 B 轮前风险项。
 
 本次 completion-wake 回归的真实原因是公共 Compose 参数重构后强制读取 `cfg.dual_shard_same_gpu`，破坏了 media-worker 原有最小配置调用路径；已修生产代码，缺失该可选字段时使用原有单路模式。`test_media_worker_completion_wake.py` 的原四项测试没有修改。
 
@@ -82,9 +82,9 @@ sink 仅校验其实际读写的 `/media/rolling-cache`，media-worker 校验该
 用户提供的审查提交 `516a31b` 指出 B1/B2 和 M1–M5。当前工作树的处理结果如下：
 
 - **B1 已修复：** 规则回读的 `camera_id` 数组改为 `text[]`；新增真实 PostgreSQL 迁移测试，使用非 UUID 的 TEXT camera ID 执行 `insert_pressure_cameras` 并回读规则。无一次性数据库 URL 时该测试明确跳过，不伪造通过。
-- **B2 已修复：** 双路压测重建前快照 `savant-a/b`、`replay-raw-fanout-a/b`，以及请求拓扑中的 `adaface-roi-worker`/decoupled 附加服务，记录完整 Env、Image、Mounts、Labels 和 Running 状态。恢复固定使用正式 base、`operator-dual-runtime.override.yml`、storage override 和快照 Env；原停止服务用 `--no-start`，恢复后对 Env、镜像、挂载、标签和运行状态做双向比对。不存在的可选服务只核验不存在，不清理其他 10-13 残留。
+- **B2 路线二调整：** 双路压测前仍快照 `savant-a/b`、`replay-raw-fanout-a/b` 及请求拓扑中的附加服务，记录完整 Env、Image、Mounts、Labels 和 Running 状态；压测结束只停止这些 operator 容器并做只读双向比对，差异写入报告并标为 `approved_known_drift`，不重建、不删除、不计入 `restore_errors`。Docker API 精确克隆恢复延期到 B 轮前另立任务，不清理其他 10-13 残留。
 - **M1 已修复：** 每个恢复步骤独立捕获异常，写入 `restore_errors` 后继续；先停双路压测运行时，最终状态在任一恢复差异时为 `failed_restore_verification`，退出码为 1。新增三处注入失败的 `main()` 级测试和 blocked + CPU 隔离路径测试。
-- **M4 已修复：** `--preflight-runtime-readback` 在纯预检阶段读取实际 forwarder/Savant 环境和代码哈希；规则注册表默认值在任何服务或数据库变更前解析；配置不一致写报告并返回 2。null-sink 不回读未重建的 Savant。
+- **M4 路线二调整：** `--preflight-runtime-readback` 在纯预检阶段校验渲染出的 forwarder/Savant/ROI 配置和 profile，不读取旧容器；运行中代码哈希回读保留在真实服务启动后的阶段，纯预检标为 `unknown`。配置不一致写报告并返回 2。
 - **M2 残留边界：** 阶段 2 A 轮使用双路滚动缓存、`force_runtime_restart=true`，正常恢复顺序会先恢复双 sink 再恢复 CPU 隔离，两个缓存端点共同使用正式 storage override。blocked-active-evidence 的提前退出路径不在阶段 2 参数范围，仍保留“CPU 隔离恢复可能单独重建 media-worker”的残留风险，已由测试覆盖并记录，不在本轮扩大设计范围。
 - **M3 残留边界：** 单路 rolling-cache-sink 不属于阶段 2；原本不存在的容器现在按不存在处理并删除意外残留后核验，单路路径仍不作为阶段 2 证据。
 - **M5 已按阶段 2 范围修复：** 非 rolling-cache 模式只记录 Compose、不做缓存盘门控；ffprobe 无码率时可用 `--rolling-cache-bytes-per-second` 明确回退并标记来源；其余只读运行时回读按实际重建服务选择。阶段 2 A 轮仍使用固定文件输入，不依赖该回退。
@@ -92,7 +92,7 @@ sink 仅校验其实际读写的 `/media/rolling-cache`，media-worker 校验该
 
 ## 验证与证据
 
-新增测试先写失败用例，再实现对应路径；本次新增参数报告、B1/B2/M1–M5 和调度契约覆盖。最终新增集合以本轮两份 JUnit 差集确定，共 **187 项，186 passed / 1 skipped / 0 failed / 0 error**，单跑退出码 0；跳过项是未配置一次性 PostgreSQL URL 的真实数据库测试，来源为同目录 `new-tests-summary.json` / `new-tests-junit.xml`。同一个冻结解释器和依赖、均移除数据库环境变量，运行全量 harness：
+新增测试先写失败用例，再实现对应路径；本轮冻结环境全量 harness 为 **2121 tests，2035 passed / 11 failed / 74 skipped / 1 collection error**，退出码 1；新增测试集合的历史单跑结果仍保留为 187 项、186 passed / 1 skipped / 0 failed / 0 error。当前失败集合按完整 nodeid 比较是基线 `98d388c` 的子集，四个失败消失及原因见 `evidence/rolling_cache_phase1_20261015/recheck-r5/README.md`。同一个冻结解释器和依赖、均移除数据库环境变量，运行全量 harness：
 
 ```sh
 env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
@@ -102,7 +102,7 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 | 口径 | 基线 98d388c | 阶段 1 | 10-12 运行参考 |
 |---|---:|---:|---|
-| passed | 1839 | 2029 | 不适用，非同套 harness |
+| passed | 1839 | 2035 | 不适用，非同套 harness |
 | failed | 15 | 11 | 不适用 |
 | skipped | 73 | 74 | 不适用 |
 | collection error | 1 | 1 | 不适用 |
@@ -139,7 +139,7 @@ env -u DATABASE_URL -u VIDEO_ANALYTICS_DATABASE_URL \
 
 **最新授权后第 1 轮交审重验：通过。** `2026-10-15T22:47:25.613763+09:00` 至 `22:47:27.545463+09:00`，最新完整源码在独立 `/tmp/pressure60-phase1-preflight-20261015-r2` 运行，复用既有输入。NVMe 返回 0，机械盘返回 2，两次报告均含原因和退出码。30 个正式容器前后一致。全部原始输出、报告、退出码及精确源码哈希见 [最新实机证据](code_review/evidence/rolling_cache_phase1_20261015/preflight-r2/README.md)。目录 r2 只延续历史命名，不代表本次授权已消耗两轮。
 
-**当前工作树真实辅助容器复验：通过。** `2026-10-17T00:23:26.545690+09:00` 至 `00:23:28.662632+09:00`，当前源码在 `uos157` 的独立 `/tmp/pressure60-phase1-preflight-20261016` 运行。正常 storage override 返回 0 并识别两个 NVMe 缓存路径；省略 storage override 返回 2 并识别 `/data` 的 rotational=true。两次均写报告，stdout/stderr 为空；前后 30 个正式容器完全一致。完整命令、报告、原始输出、容器比较和当前源码哈希见 [当前实机证据](code_review/evidence/rolling_cache_phase1_20261015/preflight-r3/README.md)。
+**路线二收回后的真实辅助容器复验：通过。** `2026-10-17T04:43:26.649714+09:00` 至 `04:43:28.844269+09:00`，当前源码在 uos157 的独立 `/tmp/pressure60-phase1-preflight-20261017-r5` 运行。正常 storage override 返回 0 并识别两个 NVMe 缓存路径；省略 storage override 返回 2 并识别 `/data` 的 rotational=true。两次均写报告，stdout/stderr 为空；前后 30 个正式容器完全一致。纯预检只校验渲染配置，运行态镜像哈希约束由本轮 `recheck-r5` 定向测试覆盖。完整命令、报告、原始输出、容器比较和当前源码哈希见 [本轮实机证据](code_review/evidence/rolling_cache_phase1_20261015/preflight-r5/README.md)。
 
 ### 推送与审查状态
 

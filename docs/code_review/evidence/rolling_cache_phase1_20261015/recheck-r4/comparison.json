@@ -1,0 +1,40 @@
+{
+  "status": "HARNESS_GATE_PASSED",
+  "baseline_commit": "98d388c",
+  "current": "recheck-r4-working-tree",
+  "current_harness_returncode": 1,
+  "generated_at_kst": "2026-10-17T04:30:30.366744+09:00",
+  "baseline_counts": {
+    "tests": 1928,
+    "failures": 15,
+    "errors": 1,
+    "skipped": 73,
+    "passed": 1839
+  },
+  "current_counts": {
+    "tests": 2119,
+    "failures": 11,
+    "errors": 1,
+    "skipped": 74,
+    "passed": 2033
+  },
+  "added_failures_or_errors": [],
+  "removed_failures_or_errors": [
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compose:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_restarts_only_originally_running_services:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_daily_config:failure",
+    "harness/tests/test_midterm_pressure60_script.py::test_start_rolling_cache_sinks_fails_when_dual_raw_fanout_missing:failure"
+  ],
+  "comparison_passed": true,
+  "failure_messages_source": "current-junit.xml and baseline-summary.json",
+  "source_sha256": {
+    "harness/tests/test_midterm_pressure60_preflight_cli.py": "626f936dec4e5e2c73bd1e2f2afb3dc10919fd3423861151f9fac56a1d9bc082",
+    "harness/tests/test_midterm_pressure60_baseline_pollution.py": "2138ef7b74fd68f86d7fce771c53014f35280256eec6a33cc99bb1a430a4c55e",
+    "harness/tests/test_midterm_pressure60_compose_guard.py": "033cada708932a5bda9eeb80b1e84686390b5f54c01738ec511c7e2dcaa4c216",
+    "harness/tests/test_midterm_pressure60_runtime_readback.py": "67ad68341e99ca43bdb48163837be8b7e965027e1afc8a36f21a21e727f8171e",
+    "harness/tests/test_midterm_pressure60_script.py": "ed7243765bcc6dcd40ba5a2cb8fd119e8faf2da403519031e822a9a179639ad4",
+    "scripts/runtime/pressure_baseline_guard.py": "1ef774725d54a47eecefae3e95eec1fad56ac956e574546e3f5dc6f435abc896",
+    "scripts/runtime/pressure_runtime_readback.py": "33c86c1c3459936b8437446bb43755d11da886c87e4c6a91c298b3a10eb5a938",
+    "scripts/runtime/run_midterm_pressure60.py": "16eb3c119bbd6d9670fab2100353e7639d2e86ac8f5f54c1c2192f50b672981a"
+  }
+}

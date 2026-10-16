@@ -72,6 +72,13 @@ def test_empty_environment_is_unverified_without_blocking():
     assert result["blocking"] is False
 
 
+def test_formal_rcam_source_id_is_not_pressure_source():
+    from scripts.runtime.pressure_baseline_guard import is_pressure_source
+
+    assert is_pressure_source("rc400_rawtap_fix_00")
+    assert not is_pressure_source("rcam_front")
+
+
 @pytest.mark.parametrize("dual", [False, True])
 def test_collector_reads_mode_sinks_and_all_four_pollution_checks(tmp_path, monkeypatch, dual):
     module = _load_module()

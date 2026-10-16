@@ -145,6 +145,44 @@ def test_code_mismatch_stops_even_with_matching_env(tmp_path):
     assert error.value.report["forwarders"]["replay-raw-fanout-a"]["code"]["status"] == "mismatch"
 
 
+def test_code_hash_uses_a_running_container_with_the_same_image_id(tmp_path):
+    module = _load()
+    expected, commands, observed, env, run = _setup(tmp_path)
+    image_ids = []
+
+    def image_id(name):
+        image_ids.append(name)
+        return "sha256:pressure-image"
+
+    report = module.collect_runtime_readback(
+        _cfg(), expected_forwarder_env=expected, docker_env=env, run_command=run,
+        source_root=tmp_path, docker_image_id=image_id,
+        running_container_for_image=lambda value: "video-analytics-midterm-code-source",
+    )
+    assert set(image_ids) == {
+        "video-analytics-midterm-replay-raw-fanout-a",
+        "video-analytics-midterm-replay-raw-fanout-b",
+    }
+    assert all(command[2] == "video-analytics-midterm-code-source" for command in commands)
+    assert all(record["code"]["status"] == "matched" for record in report["forwarders"].values())
+
+
+def test_code_hash_is_unknown_without_a_running_container_with_the_same_image(tmp_path):
+    module = _load()
+    expected, commands, observed, env, run = _setup(tmp_path)
+    report = module.collect_runtime_readback(
+        _cfg(), expected_forwarder_env=expected, docker_env=env, run_command=run,
+        source_root=tmp_path, docker_image_id=lambda _name: "sha256:pressure-image",
+        running_container_for_image=lambda _value: None,
+    )
+    assert commands == []
+    assert all(record["code"]["status"] == "unknown" for record in report["forwarders"].values())
+    assert all(
+        record["code"]["reason"] == "no_running_container_with_target_image_id"
+        for record in report["forwarders"].values()
+    )
+
+
 def test_exec_failure_cannot_silently_skip_code_check(tmp_path):
     module = _load()
     with pytest.raises(module.RuntimeReadbackError, match="exec"):
@@ -190,3 +228,59 @@ def test_expected_environment_comes_from_exact_compose_config():
     assert module.expected_forwarder_environment(config, ("fanout-a",)) == {"fanout-a": ENV}
     with pytest.raises(module.RuntimeReadbackError, match="expected"):
         module.expected_forwarder_environment({"services": {}}, ("fanout-a",))
+
+
+def test_rendered_pressure_config_validation_does_not_read_stale_containers(tmp_path):
+    module = _load()
+    cfg = _cfg(artifact_dir=tmp_path, adaface_roi_redis=True)
+    services = {}
+    for service in ("replay-raw-fanout-a", "replay-raw-fanout-b"):
+        services[service] = {"environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "30000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192",
+        }}
+    for service in ("savant-a", "savant-b"):
+        services[service] = {"environment": {
+            "FACE_INFER_INTERVAL": "3",
+            "FACE_EMBEDDING_INFER_INTERVAL": "3",
+            "SAVANT_MODULE_FILE": str((tmp_path / "module.pressure.yml").resolve()),
+            "FACE_ROI_EXPORT_ENABLED": "true",
+            "FACE_OBSERVATION_EXPORT_ENABLED": "false",
+            "ADAFACE_INPUT_OBJECT": "disabled.face",
+        }}
+    report = module.validate_rendered_pressure_config(cfg, {"services": services})
+    assert report["status"] == "passed"
+    assert report["code"]["status"] == "unknown"
+
+
+def test_rendered_pressure_config_validation_fails_on_request_drift(tmp_path):
+    module = _load()
+    cfg = _cfg(artifact_dir=tmp_path)
+    services = {
+        "replay-raw-fanout-a": {"environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "10000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192",
+        }},
+        "replay-raw-fanout-b": {"environment": {
+            "FORWARDER_MAX_QUEUE_AGE_MS": "10000",
+            "FORWARDER_STRICT_FPS_BUDGET": "true",
+            "FORWARDER_QUEUE_MAX_SIZE": "8192",
+        }},
+        "savant-a": {"environment": {
+            "FACE_INFER_INTERVAL": "3", "FACE_EMBEDDING_INFER_INTERVAL": "3",
+            "SAVANT_MODULE_FILE": str((tmp_path / "module.pressure.yml").resolve()),
+            "FACE_ROI_EXPORT_ENABLED": "false", "FACE_OBSERVATION_EXPORT_ENABLED": "true",
+            "ADAFACE_INPUT_OBJECT": "yolov8_face.face",
+        }},
+        "savant-b": {"environment": {
+            "FACE_INFER_INTERVAL": "3", "FACE_EMBEDDING_INFER_INTERVAL": "3",
+            "SAVANT_MODULE_FILE": str((tmp_path / "module.pressure.yml").resolve()),
+            "FACE_ROI_EXPORT_ENABLED": "false", "FACE_OBSERVATION_EXPORT_ENABLED": "true",
+            "ADAFACE_INPUT_OBJECT": "yolov8_face.face",
+        }},
+    }
+    with pytest.raises(module.RuntimeReadbackError, match="mismatch") as error:
+        module.validate_rendered_pressure_config(cfg, {"services": services})
+    assert error.value.report["forwarders"]["replay-raw-fanout-a"]["mismatches"]
