@@ -10,12 +10,16 @@
   - 检出 `d37618b`，核对 compose 渲染路径、恢复路径和帧率门控的计算方式；
   - 审读 `4d98fb5..d37618b` 的 8 个提交，其中代码改动约 660 行。
 - **限制：** 本次没有拿到 report 原件，以下需要实机数据的结论都标为"待证据"。
+- **更新（同日 08:34 KST 之后）：**
+  - Codex 对生产做了只读核查，推翻了初版 F1 的"生产当前已损坏"；
+  - 随后做了第二轮静态追踪，包括 3 路并行追踪和 2 路反驳审查，并用 `env -i docker compose config` 实际渲染验证；
+  - 修订了 F1、F2，新增 F7、F8。
 
 ## 结论
 
 1. **A 轮不通过。** 有效结论只有两条，下面"有效结论"一节列出。证据链路从事件这一步起就没有运行，所以 A 轮没有回答"NVMe 上的证据能否在 180 秒内完成"。
-2. **生产可能正处于故障状态（最高优先级）。** 恢复步骤用同一份仓库 compose 重建了 event-worker、media-worker、clip-worker，它们的数据库地址和压测期间一样，很可能仍是错的。"30 个容器都在"不代表它们健康。必须先做只读核查，见 F1。
-3. **数据库连接失败是 runner 的配置渲染问题，不是性能问题。** 我在 A 轮任务里要求"用仓库默认 compose"，正是这个要求暴露了它：仓库的 compose 和 env 与 uos157 生产的连接配置并不一致。
+2. **生产当前正常（Codex 08:34 实机核查）。** 但恢复得对，靠的是 CPU 隔离恢复步骤顺带把容器整套环境变量钉回了快照值，不是恢复设计本身可靠。换一组参数，恢复会报"通过"，而 event、clip 仍连着错误的数据库。见 F1。
+3. **数据库连接失败是 runner 的配置渲染问题，不是性能问题。** 我在 A 轮任务里要求"用仓库默认 compose"，正是这个要求暴露了它。同一个坑 2026-07-21 就踩过一次，当时的正确做法记录在 `media_worker_finalizer_admission_fenced_retry_2026-07-21.md` 第 429–433 行，但没有固化进 runner。见 F2。
 4. **滚动缓存的帧率 17.4 fps（门槛 27）是真实问题，还是口径问题，目前还分不出来。** 需要逐跳统计帧数来定位，见 F3。
 
 ## 有效结论
@@ -27,34 +31,79 @@
 | 轨迹落库 | 94,204 / 94,204 | person-observation-worker 没有被重建，用的是生产的数据库地址，所以正常 |
 | GPU | 最高 61°C | 没有热降频的风险 |
 
-## F1 最高优先级：恢复后的生产 worker 很可能仍连错数据库
+## F1（已修订）：生产没有坏，但恢复的正确性只是碰巧
 
-- **机制：**
-  - 正常路径的恢复（2784、2818、2827 行）和中断路径的恢复（2035、2061、2070 行）都调用 `configure_clip_worker_replay_shards`、`configure_event_worker_evidence_admission` 和 `configure_media_worker_rolling_cache`，用 `--force-recreate` 重建这三个服务。
-  - 这三个函数用的都是 `_compose_base_args(cfg)`，也就是 `--env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml`，和压测期间用的是同一套。
-  - compose 里写的是 `DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}`。
-  - 仓库的 env 里没有 `VIDEO_ANALYTICS_DATABASE_URL`，runner 也从来不设置它。所以恢复出来的容器仍然连 `172.17.0.1:5432`。
-- **后果：** 生产的事件入库、证据生成和剪辑全部停止，8090 看不到新证据。face-worker 和 person-observation-worker 没有被重建，所以不受影响，这也会让问题看起来像"部分正常"。
-- **核查（只读，立即执行）：** 对这三个容器读取 `DATABASE_URL`、`State.Status`、`RestartCount` 和最近 50 行日志，与压测前的快照比对。
-- **修复（需要用户批准）：** 不要再用仓库 compose 去"修"。按生产原来的创建方式重建这三个容器：使用 `/home/user/video-analytics` 下生产自己的 compose 和 env，`--no-build --no-deps --force-recreate`。重建后回读 `DATABASE_URL`，与压测前快照一致；60 秒内 RestartCount 不增长；日志里没有 `connection refused`。
+- **初版判断（已被推翻）：** 初版认为恢复步骤和压测用的是同一套仓库配置，所以生产应该已经坏了。
+- **推翻依据：** Codex 08:34 实机只读核查：
+  - event、media、clip、face、person 这 5 个 worker 都是 running，DATABASE_URL 都是 `postgres:5432`；
+  - 近期日志里连接错误为 0；
+  - event、media、clip 的 compose 标签指向生产 checkout，并带有 r5 的 CPU 隔离恢复 override。
+- **我漏看的地方：** 恢复时用的 `restore_cfg = formal_restore_config(cfg)`（1393–1410 行）会读取生产 media-worker 的 compose 标签，改用生产的 compose 和 env 文件。恢复期间只有 `compose stop`（2774、2029 行）还用仓库配置。
+- **恢复结果正确的真正原因（第二轮追踪 + 反驳审查确认）：**
+  1. event 和 clip 的恢复只回写各自请求的 16 个和 8 个键（5272–5305、5246–5269 行），校验也只比这些键（6229–6236 行），不涉及 DATABASE_URL。
+  2. 正常恢复里最后一次重建是 `restore_worker_cpu_isolation`（2894–2901 行）。它把压测前（2196 行）快照里完整的 `Config.Env` 和镜像 ID 写成 override，并校验完全一致（5127–5159 行）。三个容器带着 CPU 隔离恢复 override 标签，说明它们的最终状态来自这一步。
+  3. media 的恢复在 rolling-cache 模式下也会回写完整环境变量（2187、5308–5310 行）。
+- **隐患：** 如果 `--cpu-isolation-profile none`（这是默认值，913–916 行），或者走的是中止恢复路径，就没有"回写完整环境变量"这一步。这时 event 和 clip 的 DATABASE_URL 取决于生产 env 文件里有没有 `VIDEO_ANALYTICS_DATABASE_URL`（目前未知），以及 runner 所在 shell 的环境。恢复照样报"通过"，生产却连着 `host.docker.internal:5432`。
+- **修法：** 并入 F2 的第 2、4 项：
+  - 恢复后校验完整环境变量（减去镜像自带的 ENV），而不是只比请求过的键；
+  - 恢复后也要执行连通性检查。
 
-## F2 数据库地址漂移：根因与修法
+## F2 数据库地址漂移：根因与修法（已修订）
 
-- **根因：** runner 只知道如何覆盖压测相关的参数，并不知道生产的连接配置是什么。从仓库渲染出来的 compose 和生产实际在跑的容器不一致，而现有的预检只核对压测相关的键，所以发现不了。
-- **为什么 10-12 没出问题：** 10-12 用的是手工改过的生产 compose，连接配置碰巧是对的。
-- **修法（三项都要）：**
-  1. **连接配置取自生产快照。** 压测开始前，从将要重建的每个生产容器的 `docker inspect` 中读出连接类变量：`DATABASE_URL`、`VIDEO_ANALYTICS_DATABASE_URL`、`REDIS_URL`、`API_BASE_URL` 等，以及 compose 的插值来源。runner 在压测和恢复时调用 compose 的进程环境里，都要显式带上这些值。报告记录键名和脱敏后的主机与端口。
-  2. **预检时比对渲染结果与生产容器（失败即拒绝）。** 对每个将要重建的服务，用 `compose config --format json` 渲染出环境变量，与该服务当前生产容器的环境变量逐键比较：
-     - 差异键只能出现在压测允许改动的白名单里（`FORWARDER_*`、`FACE_*_INTERVAL`、`ROLLING_CACHE_*`、`EVIDENCE_*` 中压测确实请求的那些键等）；
-     - 白名单之外有任何差异，就返回 2，并列出差异键（值脱敏）。
+- **根因（已确认）：**
+  1. 压测阶段对 event、media、clip 的每一次重建都使用 `cfg`（事件 2268→6180→6214–6222，媒体 2268→6185→5444–5453，剪辑 2284/2333/2379→6366–6373）。
+  2. `cfg` 的 compose 和 env 文件是相对路径默认值，按 runner 进程的 cwd 解析（77–78、1024–1025、3378、3382 行），也就是仓库 checkout 里的文件。
+  3. 仓库 compose 写的是 `DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-…@host.docker.internal:5432…}`（53、1059、1124、1151、1261、1299、1569 行），仓库的 `midterm.env` 不定义这个变量，runner 也不设置。
+  4. 生产里的这个值是 `scripts/midterm_start.sh:398-407` 在 `--local-postgres` 下，只在自己的进程里 export 的，不会落盘。
+  5. 仓库 postgres 只映射宿主端口 5439（compose 133 行），宿主 5432 上没有服务，所以连 `172.17.0.1:5432` 被拒。
+  6. face-worker 和 person-observation-worker 在压测期间只被 `docker update` 过（4971–4999 行），没有重建，所以正常。
+- **验证：** 在空环境（`env -i`）里用仓库文件执行 `docker compose config`，对比两种渲染：
+  - 不设任何变量的渲染；
+  - 按 midterm_start 方式设置 `VIDEO_ANALYTICS_DATABASE_URL=postgres:5432` 并启用 `--profile local-postgres` 的渲染。
 
-     这一项比对能直接拦下 A 轮的问题。
-  3. **预热阶段尽早失败。** 正式采样开始前，对每个被重建的 worker：
-     - 在容器内执行一次 `SELECT 1`（或者读 worker 自己的健康接口）；
-     - 60 秒内 RestartCount 不得增长。
+  两者只差 api、clip、event、face、media、person 这几个服务的 DATABASE_URL，以及 postgres 服务本身。
+- **为什么 10-12 没出问题：** 10-12 用的是手工改过的生产 compose。2026-07-21 那次的正确做法是同时固定宿主侧的 `DATABASE_URL=:5439` 和容器侧的 `VIDEO_ANALYTICS_DATABASE_URL=postgres:5432`（见上述 07-21 文档），但这一点从未写进 runner。
+- **另一个问题：** runner 在发现漂移之后也没有察觉。重建后的校验只比较 runner 自己设置的键（事件 6230–6236、媒体 5465–5471、剪辑 6438 行起），`run(check=True)` 只看 compose 的返回码。
+- **修法（第 1–4 项必须做，第 5、6 项建议一起做）：**
+  1. **启动时检查基线是否健康，再拍快照。** 在任何改动之前，对所有使用数据库的生产容器（api、event、media、clip、face、person）：
+     - DATABASE_URL 必须一致；
+     - 不得指向 `host.docker.internal`、`172.17.0.1` 或环回地址；
+     - 在容器内执行 `SELECT 1` 必须成功。
 
-     任一项失败，就直接进入恢复，状态记为 `failed_preflight_runtime`，不要白白跑满一小时。
-- **测试：** 用"生产容器的 env 有 `DATABASE_URL=…:5433…`、仓库 env 没有"作为夹具：预检必须返回 2；带上快照后，渲染出的结果与生产一致。
+     任一项不满足就返回 2，避免把已经坏掉的值当作基线带下去。
+  2. **集中钉住连接值。** 用通过检查的值设置 `os.environ["VIDEO_ANALYTICS_DATABASE_URL"]`，不要逐个调用点去补：
+     - 所有 compose 调用都继承进程环境，包括 `env=None` 的那些（3485、3540、3815 行起、3885、5145 行），以及中止、finally、错误分支的路径，所以设置一次就能全部覆盖；
+     - 进程环境里的值不会被再次插值，密码中含 `$` 也安全；
+     - 报告记录生产 env 文件里是否也定义了这个变量；两者不一致时如实记录，不要掩盖。
+  3. **检查连通性，压测和恢复都要做。** 在最后一次重建之后执行：
+     - 最后一次重建包括剪辑分片的 2333/2379 行、sink、cpuset 重新应用，以及 `--dual-shard-api` 下 8090 topology apply 按 inspect 克隆出的容器；
+     - 对每个使用数据库的 worker：先读重建后的 RestartCount 作为基线，执行 `SELECT 1`（`docker exec` 失败直接算失败，不重试），60 秒内 RestartCount 不得增长；
+     - 压测阶段失败就直接进入恢复，状态记为 `failed_preflight_runtime`；
+     - 恢复之后执行同样的检查，失败时状态为 `failed_restore_verification`。
+  4. **恢复后校验完整环境变量。** event、clip、media 的恢复校验改为比较完整 `Config.Env` 与快照：
+     - 先减去 `docker image inspect` 得到的镜像自带 ENV；
+     - 只忽略明确列出的少量键。
+
+     这一项修掉 F1 的隐患。
+  5. **预检时比较渲染结果与生产容器（建议）。** 对将要重建的服务，用与真实 `up` 完全相同的参数渲染：
+     - 同样的 override 文件（事件 6205、媒体 5432–5446、双路 3491/3520、sink 5534）；
+     - 同样的进程环境叠加。
+
+     然后与生产容器比较：
+     - 镜像自带的 ENV 要减掉；
+     - inspect 失败时按失败处理；
+     - 名称里带 `URL`、`HOST`、`ENDPOINT`、`ROOT`、`DIR`、`DEVICES`、`PORT` 的键，只要变化就失败，包括新增键的值指向网关或环回地址；
+     - 其他差异只写进报告。
+
+     不要手写一份宽白名单，那会把真正的漂移掩盖掉。
+  6. **记录 cwd 并核对恢复配置的来源。** 报告记录 runner 的 cwd 和完整 argv。断言 `restore_cfg` 的 compose 文件与 `cfg` 不同，并且其 working_dir 等于显式传入的 `--formal-root`（例如 `/home/user/video-analytics`）。否则返回 2，防止 media-worker 的标签被上一轮污染后，"正式恢复"实际指向仓库。
+- **脱敏：** 新增的任何输出都要去掉 URL 中的 userinfo。现有产物里已有明文副本，后续单独清理：`report.json` 和 `run_config.json` 的 `config.db_url`、`cpu_isolation_before.json`、CPU 隔离和 media 恢复的 override yml。
+- **测试：** 至少覆盖以下情形：
+  - 生产容器的 DATABASE_URL 指向 `postgres:5432`、仓库 env 不定义该变量时，钉住后渲染结果与生产一致；
+  - 基线指向 `host.docker.internal` 时返回 2；
+  - `docker exec` 失败时检查不通过；
+  - `--cpu-isolation-profile none` 时，恢复校验能抓到 DATABASE_URL 被改。
+- **当次运行的临时办法（代码修好之前，只能作为补充）：** 启动 runner 时同时 export 宿主侧的 `DATABASE_URL=…:5439…` 和容器侧的 `VIDEO_ANALYTICS_DATABASE_URL=postgresql://video:***@postgres:5432/video_analytics`，与 07-21 的做法一致。
 
 ## F3 滚动缓存帧率 17.4 fps
 
@@ -117,9 +166,39 @@
   2. `PRESSURE_FORWARDER_IMAGE` 从进程环境读取，报告必须记录解析后的镜像 ID；
   3. 预检仍没有比对连接配置，见 F2。
 
+## F7 双路容器仍处于压测配置（新增，需要只读核查）
+
+- 按路线二，双路容器只停止、不重建，恢复过程只读取它们的状态（3715–3790 行，`recreated: False`）。Codex 08:34 的 5 容器核查没有覆盖它们。
+- **范围：** savant-a/b、replay-raw-fanout-a/b、adaface-roi-worker。direct 模式下被停止的 analysis-forwarder-a/b、replay-a..h、video-file-sink-a..h 也在内。
+- **它们目前保留的压测配置：**
+  - `SAVANT_MODULE_FILE=<artifact>/module.pressure.yml`（3921 行）；
+  - `SAVANT_B_MODEL_ROOT`、GPU 编号（3512–3515 行）；
+  - `PRESSURE_FORWARDER_IMAGE` 指定的镜像（3985–3987 行）；
+  - 仓库 checkout 的 bind mount；
+  - 带 run 编号的 ROI stream 和 consumer group。
+- **新风险：** 8090 启动双路时会按 `docker inspect` 克隆这些容器（`runtime_performance.py:980-1014`），而 `_savant_env` 不会重置 `SAVANT_MODULE_FILE`（`runtime_topology.py:1634-1700`）。只要 r5 的产物目录被移动或清理，8090 下次启动双路就会加载不到 module。
+- **要求：**
+  - 只读回读这些容器的 `SAVANT_MODULE_FILE`、模型挂载、镜像 ID、`config_files` 标签和状态；
+  - B2（用 Docker API 克隆实现精确恢复，或者经用户批准把它们规范化回正式配置）的优先级提到 B 轮之前；
+  - 在此之前，r5 的产物目录不得移动或删除。
+
+## F8 缺少完整的部署快照（新增）
+
+- Codex 报告：r5 目录里没有完整的 `deployment_snapshot_before.json`，只有 5 个容器的 CPU 和双路快照，所以无法对 30 个容器做压测前后的精确比对。
+- **要求：** 在第一次改动之前，对所有 `video-analytics-midterm-*` 容器保存完整的 `docker inspect`（Config、HostConfig、Mounts、NetworkSettings.Networks、Image ID）。结束时再保存一份，并写出差异：
+  - 可以忽略的差异：Id、Created、State 中的时间戳、RestartCount 被重置；
+  - 其余每一项差异都必须归入"已批准的漂移"或"恢复失败"之一。
+- 这份快照同时是 B2 精确恢复的输入。
+
 ## 下一次实机运行之前
 
-1. 先处理 F1，并经用户批准，把生产恢复到压测前的状态。
-2. 修好 F2 的三项和 F5 的第 1、2、3 项，补上测试，推送后由 Opus 复审。复审时运行的提交必须和推送的提交一致。
-3. 拿到 F3、F4 要求的证据（只读取证，或者 10 分钟的短跑，需要单独批准窗口）之后，再决定下一轮的变量。
+1. ~~先处理 F1~~：Codex 08:34 实机核查确认生产正常，不需要修复。
+2. 修好 F2 的第 1–4 项（第 5、6 项建议一起做）、F1 隐患（已并入 F2 第 4 项）、F5 的第 1、2、3 项、F6 遗留问题第 2 项和 F8，补上测试，推送后由 Opus 复审。实机运行的提交必须和复审通过的提交一致。
+3. 拿到 F3、F4、F7 要求的只读证据之后，再决定下一轮的变量。需要短跑时单独申请窗口。
 4. 片源与 10-12 保持一致，除非用户明确批准更换。
+
+## 仍未知（需要 Codex 只读提供）
+
+- r5 的完整 argv 和 cwd：`--cpu-isolation-profile`、`--rolling-cache-evidence`、`--dual-shard-same-gpu`、`--dual-shard-api`、`--db-url`，以及 shell 是否 export 了 `VIDEO_ANALYTICS_DATABASE_URL`。
+- 生产 env 文件 `/home/user/video-analytics/infra/env/midterm.env` 是否定义了 `VIDEO_ANALYTICS_DATABASE_URL`（只报键是否存在，不报值）；event-worker 的 `Config.Env` 里是否有这个键。
+- r5 的 `cpu_isolation_restore.json`、`compose_restore_event_worker_evidence_admission.log`、`compose_restore_clip_worker_replay_shards.log`：用来确认 F1 修订版的推断。
