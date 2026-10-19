@@ -17,6 +17,7 @@ from app.services.runtime_control import (
     stop_dual_runtime,
     stop_single_runtime,
 )
+from app.services.deployment_status import build_deployment_status
 from app.services.runtime_overview import RuntimeOverviewError, build_runtime_overview
 from app.services.runtime_performance import (
     RuntimePerformanceError,
@@ -111,6 +112,11 @@ def runtime_overview(request_id: str = Depends(_request_id)):
         return _ok(build_runtime_overview(), request_id)
     except RuntimeOverviewError as exc:
         return _err_response(503, str(exc), request_id)
+
+
+@router.get("/deployment")
+def runtime_deployment(request_id: str = Depends(_request_id)):
+    return _ok(build_deployment_status(), request_id)
 
 
 @router.get("/latency")

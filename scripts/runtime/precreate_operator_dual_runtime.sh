@@ -11,10 +11,11 @@ STORAGE_OVERRIDE="${MIDTERM_STORAGE_OVERRIDE:-$REPO_ROOT/infra/midterm-storage.o
 OPERATOR_OVERRIDE="${MIDTERM_OPERATOR_OVERRIDE:-$REPO_ROOT/infra/operator-dual-runtime.override.yml}"
 ENV_FILE="${MIDTERM_ENV_FILE:-$REPO_ROOT/infra/env/midterm.env}"
 
-compose_args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-[[ -f "$STORAGE_OVERRIDE" ]] && compose_args+=(-f "$STORAGE_OVERRIDE")
-[[ -f "$OPERATOR_OVERRIDE" ]] && compose_args+=(-f "$OPERATOR_OVERRIDE")
-compose_args+=(--profile operator-dual-runtime)
+# shellcheck source=midterm_compose_context.sh
+source "$SCRIPT_DIR/midterm_compose_context.sh"
+midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE" "$OPERATOR_OVERRIDE"
+MIDTERM_COMPOSE_ARGS+=(--profile operator-dual-runtime)
+compose_args=("${MIDTERM_COMPOSE_ARGS[@]}")
 
 services=(
   cuda-mps-operator

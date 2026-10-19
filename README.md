@@ -98,6 +98,12 @@ http://127.0.0.1:8090/system/deployment-baseline
 
 `scripts/midterm_start.sh` remains the underlying deployment script. Use `scripts/school_deploy.sh` for the formal school deployment.
 
+For a new machine, create a clean bundle with `bash scripts/midterm_package_clean.sh`
+and restore it with `bash scripts/midterm_deploy_clean.sh PACKAGE.tgz`. The package
+contains the repository and model assets but deliberately excludes production runtime
+data; use the database backup/migration commands in `docs/midterm_deployment.md`
+for PostgreSQL state.
+
 ### 4. Configure and Start Video Analysis
 
 1. Register RTSP addresses under **Configuration → Cameras**;
@@ -167,9 +173,13 @@ Evidence tasks have explicit waiting, running, completed, failed, and expired st
 | Purpose | File |
 | --- | --- |
 | School deployment entry point | `scripts/school_deploy.sh` |
+| Clean-machine package and restore | `scripts/midterm_package_clean.sh`, `scripts/midterm_deploy_clean.sh` |
 | Main Compose configuration | `infra/docker-compose.midterm.yml` |
 | Default environment variables | `infra/env/midterm.env` |
 | Storage mounts | `infra/midterm-storage.override.yml` |
+| Shared Compose arguments | `scripts/runtime/midterm_compose_context.sh` |
+| Deployment manifest | `scripts/runtime/capture_deployment_manifest.sh` |
+| Database backup and migration | `scripts/runtime/midterm_db_migrate.py` |
 | Dual-branch runtime override | `infra/operator-dual-runtime.override.yml` |
 | Savant module | `modules/savant_security/module.yml` |
 | Camera runtime snapshot | `modules/savant_security/config/cameras.midterm.yml` |

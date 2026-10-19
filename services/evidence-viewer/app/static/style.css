@@ -653,6 +653,21 @@ p {
   color: var(--amber);
 }
 
+.runtime-deployment-panel {
+  margin: 14px 0;
+  padding: 13px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.runtime-deployment-detail {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .runtime-latency-panel {
   margin: 14px 0;
   padding: 13px;

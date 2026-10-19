@@ -7,12 +7,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 OUT_ROOT="${MIDTERM_MIGRATION_OUT_ROOT:-$DATA_ROOT/artifacts/migrations}"
-MIGRATION_ID="${MIGRATION_ID:-midterm-clean-$(date -u +%Y%m%dT%H%M%SZ)}"
+COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
+STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
+ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
+MIGRATION_ID="${MIGRATION_ID:-midterm-clean-$(TZ=Asia/Seoul date +%Y%m%dT%H%M%S%z)}"
 PACKAGE_DIR="$OUT_ROOT/$MIGRATION_ID"
 PACKAGE_TARBALL="$OUT_ROOT/$MIGRATION_ID.tgz"
 DEPLOY_SCRIPT_COPY="$OUT_ROOT/${MIGRATION_ID}_deploy_clean.sh"
 INCLUDE_ENGINES=false
 INCLUDE_IMAGES=false
+
+# shellcheck source=runtime/midterm_compose_context.sh
+source "$SCRIPT_DIR/runtime/midterm_compose_context.sh"
 
 usage() {
     cat <<USAGE
@@ -212,8 +218,9 @@ if [[ "$INCLUDE_IMAGES" == true ]]; then
     echo "[package] building local service images..."
     (
         cd "$REPO_ROOT"
-        docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml build face-worker
-        docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml build
+        midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE"
+        docker compose "${MIDTERM_COMPOSE_ARGS[@]}" build face-worker
+        docker compose "${MIDTERM_COMPOSE_ARGS[@]}" build
     )
 
     printf '%s\n' "${OFFLINE_IMAGES[@]}" > "$PACKAGE_DIR/image_list.txt"
@@ -239,9 +246,12 @@ else
     ) > "$PACKAGE_DIR/model_files.sha256"
 fi
 
+created_at_seoul="$(TZ=Asia/Seoul date -Iseconds)"
+created_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$PACKAGE_DIR/manifest.txt" <<MANIFEST
 id=$MIGRATION_ID
-created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+created_at_seoul=$created_at_seoul
+created_at_utc=$created_at_utc
 repo_root=$REPO_ROOT
 data_root=$DATA_ROOT
 include_engines=$INCLUDE_ENGINES

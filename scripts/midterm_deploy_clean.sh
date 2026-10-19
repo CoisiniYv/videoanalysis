@@ -197,7 +197,13 @@ fi
 echo "[deploy] validating compose config..."
 (
     cd "$TARGET_ROOT"
-    docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml config >/dev/null
+    if [[ "$LOCAL_POSTGRES" == true ]]; then
+        export MIDTERM_COMPOSE_PROFILES="local-postgres"
+    fi
+    # shellcheck source=scripts/runtime/midterm_compose_context.sh
+    source scripts/runtime/midterm_compose_context.sh
+    midterm_build_compose_args "infra/env/midterm.env" "infra/docker-compose.midterm.yml" "infra/midterm-storage.override.yml"
+    docker compose "${MIDTERM_COMPOSE_ARGS[@]}" config >/dev/null
 )
 
 if [[ "$START_STACK" != true ]]; then

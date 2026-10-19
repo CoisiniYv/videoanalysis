@@ -245,6 +245,7 @@ Router：`services/api/app/routers/runtime.py`
 | --- | --- | --- | --- | --- |
 | 使用 | GET | `/api/v1/runtime/overview` | 无 | 总览、source、forwarder、evidence、container |
 | 使用 | GET | `/api/v1/runtime/latency` | 无 | annotation、DB、A/B source/queue 的在线延迟摘要 |
+| 使用 | GET | `/api/v1/runtime/deployment` | 无 | 当前 Git、Compose、镜像、模型和 migration 清单及更新候选状态 |
 | 使用 | GET | `/api/v1/runtime/control` | 无 | 控制状态 |
 | 使用 | POST | `/api/v1/runtime/control/single/start` | 无 | 启动单路 |
 | 使用 | POST | `/api/v1/runtime/control/single/stop` | 无 | 停止单路 |

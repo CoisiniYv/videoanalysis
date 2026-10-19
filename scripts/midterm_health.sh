@@ -11,16 +11,10 @@ ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 API_BASE="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
 AUTH_FILE="${OPERATOR_AUTH_FILE_HOST:-$DATA_ROOT/media/evidence/.operator-auth}"
-COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-[[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
-
-if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
-    IFS=',' read -r -a _profiles <<< "$MIDTERM_COMPOSE_PROFILES"
-    for _profile in "${_profiles[@]}"; do
-        _profile="${_profile//[[:space:]]/}"
-        [[ -n "$_profile" ]] && COMPOSE_ARGS+=(--profile "$_profile")
-    done
-fi
+# shellcheck source=runtime/midterm_compose_context.sh
+source "$SCRIPT_DIR/runtime/midterm_compose_context.sh"
+midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE"
+COMPOSE_ARGS=("${MIDTERM_COMPOSE_ARGS[@]}")
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -41,6 +35,8 @@ fi
 PASS_COUNT=0
 FAIL_COUNT=0
 WARN_COUNT=0
+CONFIGURED_CAMERA_COUNT=0
+ENABLED_CAMERA_COUNT=0
 
 compose() {
     docker compose "${COMPOSE_ARGS[@]}" "$@"
@@ -123,12 +119,12 @@ check_containers() {
         "replay-service"
         "analysis-forwarder"
         "savant-security"
-        "source-adapter"
         "event-worker"
         "face-worker"
         "clip-worker"
         "video-file-sink"
         "media-worker"
+        "person-observation-worker"
     )
 
     local service status
@@ -206,6 +202,8 @@ check_camera_config() {
     local response camera_count
     response="$(operator_get "$API_BASE/api/v1/cameras" 2>/dev/null || echo '{"data":null}')"
     camera_count="$(json_count "$response")"
+    CONFIGURED_CAMERA_COUNT="${camera_count:-0}"
+    ENABLED_CAMERA_COUNT="$(echo "$response" | jq -r '[.data[]? | select(.enabled == true)] | length' 2>/dev/null || echo "0")"
 
     if [[ "$camera_count" =~ ^[0-9]+$ && "$camera_count" -gt 0 ]]; then
         log_pass "Camera count: $camera_count configured"
@@ -253,7 +251,9 @@ check_runtime_metrics() {
         echo "  - Savant status: $savant_status (FPS: $savant_fps)"
         echo "  - Replay status: $replay_status"
 
-        if [[ "$savant_status" == "running" || "$savant_status" == "healthy" ]]; then
+        if [[ "$ENABLED_CAMERA_COUNT" == "0" && "$savant_status" == "unknown" ]]; then
+            log_pass "Runtime idle: no enabled cameras"
+        elif [[ "$savant_status" == "running" || "$savant_status" == "healthy" ]]; then
             log_pass "Savant inference: running"
         elif [[ "$savant_status" == "starting" || "$savant_status" == "unknown" ]]; then
             log_warn "Savant inference: $savant_status"
@@ -261,13 +261,19 @@ check_runtime_metrics() {
             log_fail "Savant inference: $savant_status"
         fi
 
-        if [[ "$replay_status" == "running" || "$replay_status" == "healthy" || "$replay_status" == "unknown" ]]; then
+        if [[ "$ENABLED_CAMERA_COUNT" == "0" && "$replay_status" == "unknown" ]]; then
+            log_pass "Replay idle: no enabled cameras"
+        elif [[ "$replay_status" == "running" || "$replay_status" == "healthy" || "$replay_status" == "unknown" ]]; then
             log_pass "Replay service: $replay_status"
         else
             log_warn "Replay service: $replay_status"
         fi
     else
-        log_fail "Runtime overview: unavailable"
+        if [[ "$ENABLED_CAMERA_COUNT" == "0" ]]; then
+            log_pass "Runtime overview: idle with no enabled cameras"
+        else
+            log_fail "Runtime overview: unavailable"
+        fi
     fi
 }
 

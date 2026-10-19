@@ -188,6 +188,46 @@ bash scripts/midterm_stop.sh
 当前 env 默认 `FACE_VECTOR_BACKEND=pgvector`。启用 qdrant profile 还不等于 face-worker
 已切换；必须同时设置向量后端、检查 outbox/bootstrap/reconcile 和 fallback 指标。
 
+## 9. 部署清单与数据库迁移
+
+所有启动、健康检查和只读诊断都应使用同一组 Compose 参数：
+
+```text
+infra/env/midterm.env
+infra/docker-compose.midterm.yml
+infra/midterm-storage.override.yml
+MIDTERM_COMPOSE_PROFILES（如有）
+```
+
+公共参数构造器位于 `scripts/runtime/midterm_compose_context.sh`。部署完成后，
+`scripts/runtime/capture_deployment_manifest.sh` 会在
+`media/evidence/.deployment-manifest.json` 写入不含秘密的版本清单，包括 Git commit、
+渲染后的 Compose hash、镜像 ID/digest、模型和 migration 集合 hash、GPU 与 Docker 版本。
+8090 的“运行与状态 -> 部署版本”页面读取该清单；更新候选清单通过
+`DEPLOYMENT_UPDATE_MANIFEST_PATH` 显式配置，未配置时只显示当前版本和“更新通道未配置”。
+
+数据库迁移使用：
+
+```bash
+python3 scripts/runtime/midterm_db_migrate.py status --database-url "$VIDEO_ANALYTICS_DATABASE_URL"
+python3 scripts/runtime/midterm_db_migrate.py backup \
+  --database-url "$VIDEO_ANALYTICS_DATABASE_URL" \
+  --backup-dir /data/video-analytics/artifacts/db-backups
+python3 scripts/runtime/midterm_db_migrate.py migrate \
+  --database-url "$VIDEO_ANALYTICS_DATABASE_URL" \
+  --backup-dir /data/video-analytics/artifacts/db-backups
+```
+
+执行主机需要 `psycopg[binary]`、`psql` 和 `pg_dump`；`status` 在全新数据库上
+保持只读并把尚未建立 ledger 的 migration 全部列为 pending。
+
+runner 按文件名前的数字顺序执行 migration，在数据库内维护 checksum 和执行耗时，
+并持有 session advisory lock。checksum 变化会拒绝继续；`CREATE INDEX CONCURRENTLY`
+等非事务 migration 由独立 `psql` 调用执行。备份文件为 PostgreSQL custom dump，旁边保存
+脱敏连接信息和 SHA256。
+
+这组命令只负责清单、备份和 schema 迁移；原地更新和自动回滚仍由后续更新流程负责。
+
 rolling publication 的日常布局固定为
 `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=split`。`single_inode` 与
 `metadata_only` 只供带 artifact 的容量诊断显式选择；后者使用无 hard-link alias 的 v3
@@ -201,7 +241,7 @@ root/segment/publication/file-sync/layout/FPS/epoch/retention 九个值。只看
 created 不能证明恢复成功；当前安全日常结果是 split/fsync/one-worker/zero-slot/r300、24 FPS、
 空 pressure epoch。
 
-## 9. 端口
+## 10. 端口
 
 | 端口 | 用途 |
 | ---: | --- |
@@ -219,7 +259,7 @@ created 不能证明恢复成功；当前安全日常结果是 split/fsync/one-w
 8090 不代理 FastAPI `/docs`。接口清单见
 `docs/frontend_interface/02_api_inventory.md`。
 
-## 10. 相关文档
+## 11. 相关文档
 
 - 当前架构：`docs/current_architecture.md`
 - 当前状态：`docs/current_mainline_status.md`

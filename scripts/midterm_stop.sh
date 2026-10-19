@@ -8,20 +8,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
 STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
-COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-[[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
-ALL_PROFILES=(
-    local-postgres
-    dual-replay-shards
-    dual-4090-two-source
-    rolling-cache-dual
-    roi-adaface
-    operator-dual-runtime
-)
+# shellcheck source=runtime/midterm_compose_context.sh
+source "$SCRIPT_DIR/runtime/midterm_compose_context.sh"
 
-for profile in "${ALL_PROFILES[@]}"; do
-    COMPOSE_ARGS+=(--profile "$profile")
-done
+# Include every optional profile so a stop/remove operation can see containers
+# created by an earlier operator or diagnostic session.
+MIDTERM_COMPOSE_PROFILES="qdrant,local-postgres,dual-replay-shards,dual-4090-two-source,rolling-cache,rolling-cache-dual,legacy-primary-rtsp,roi-adaface,operator-dual-runtime"
+export MIDTERM_COMPOSE_PROFILES
+midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE"
+COMPOSE_ARGS=("${MIDTERM_COMPOSE_ARGS[@]}")
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m'

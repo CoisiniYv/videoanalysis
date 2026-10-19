@@ -12,6 +12,9 @@ DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 FAST_DATA_ROOT="${VIDEO_ANALYTICS_FAST_ROOT:-/home/user/video-analytics-fast}"
 OPERATOR_URL="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
 
+# shellcheck source=runtime/midterm_compose_context.sh
+source "$SCRIPT_DIR/runtime/midterm_compose_context.sh"
+
 BUILD_IMAGES=true
 SKIP_HEALTH=false
 WAIT_SECONDS=240
@@ -150,12 +153,8 @@ parse_args() {
 }
 
 build_compose_args() {
-    COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-    [[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
-    local profile
-    for profile in "${COMPOSE_PROFILES[@]}"; do
-        COMPOSE_ARGS+=(--profile "$profile")
-    done
+    midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE"
+    COMPOSE_ARGS=("${MIDTERM_COMPOSE_ARGS[@]}")
 }
 
 compose() {
@@ -507,6 +506,12 @@ print_next_steps() {
 
 main() {
     parse_args "$@"
+    if [[ ${#COMPOSE_PROFILES[@]} -gt 0 ]]; then
+        MIDTERM_COMPOSE_PROFILES="$(IFS=,; echo "${COMPOSE_PROFILES[*]}")"
+        export MIDTERM_COMPOSE_PROFILES
+    else
+        unset MIDTERM_COMPOSE_PROFILES || true
+    fi
     build_compose_args
     apply_local_postgres_default
 
@@ -531,6 +536,9 @@ main() {
 
     echo ""
     show_status
+    if ! bash "$SCRIPT_DIR/runtime/capture_deployment_manifest.sh"; then
+        log_warning "Deployment manifest capture failed; runtime startup is still complete"
+    fi
     print_next_steps
 }
 

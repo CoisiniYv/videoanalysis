@@ -10,6 +10,9 @@ ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
 STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 
+# shellcheck source=midterm_compose_context.sh
+source "$SCRIPT_DIR/midterm_compose_context.sh"
+
 mkdir -p "$(dirname "$OUTPUT")"
 
 git_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -29,8 +32,6 @@ while IFS= read -r line; do
     esac
 done < <(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal || true)
 
-compose_args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-[[ ! -f "$STORAGE_OVERRIDE" ]] || compose_args+=(-f "$STORAGE_OVERRIDE")
 active_profiles=()
 if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
     IFS=',' read -r -a raw_profiles <<< "$MIDTERM_COMPOSE_PROFILES"
@@ -38,10 +39,11 @@ if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
         profile="${profile//[[:space:]]/}"
         [[ -n "$profile" ]] || continue
         active_profiles+=("$profile")
-        compose_args+=(--profile "$profile")
     done
 fi
 active_profiles_csv="$(IFS=,; echo "${active_profiles[*]-}")"
+midterm_build_compose_args "$ENV_FILE" "$COMPOSE_FILE" "$STORAGE_OVERRIDE"
+compose_args=("${MIDTERM_COMPOSE_ARGS[@]}")
 
 compose_sha256="$(docker compose "${compose_args[@]}" config | sha256sum | awk '{print $1}')"
 compose_images="$(docker compose "${compose_args[@]}" config --images | sort -u | paste -sd ',' -)"
@@ -131,7 +133,7 @@ pose_sha256="$(model_digest "$pose_model_host")"
 face_sha256="$(model_digest "$face_model_host")"
 adaface_sha256="$(model_digest "$adaface_model_host")"
 
-captured_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+captured_at="$(TZ=Asia/Seoul date -Iseconds)"
 hostname_value="$(hostname)"
 
 tmp="${OUTPUT}.tmp.$$"

@@ -455,6 +455,19 @@
               </div>
             </div>
             <div id="runtime-health-summary" class="runtime-health-grid"></div>
+            <section class="runtime-deployment-panel" aria-labelledby="runtime-deployment-title">
+              <div class="runtime-latency-header">
+                <div>
+                  <h3 id="runtime-deployment-title">部署版本</h3>
+                  <p>查看当前代码、Compose、镜像和迁移清单；更新由管理员在维护窗口执行。</p>
+                </div>
+                <button id="refresh-runtime-deployment" type="button">刷新版本</button>
+              </div>
+              <div id="runtime-deployment-summary" class="runtime-kv-grid">
+                <div class="empty-state">正在读取部署清单。</div>
+              </div>
+              <div id="runtime-deployment-detail" class="runtime-deployment-detail"></div>
+            </section>
             <section class="runtime-latency-panel" aria-labelledby="runtime-latency-title">
               <div class="runtime-latency-header">
                 <div>

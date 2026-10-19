@@ -32,6 +32,7 @@ SUMMARY_JSON = Path(os.environ["SUMMARY_JSON"])
 
 COMPOSE = ROOT / "infra" / "docker-compose.midterm.yml"
 ENV_FILE = ROOT / "infra" / "env" / "midterm.env"
+STORAGE_OVERRIDE = ROOT / "infra" / "midterm-storage.override.yml"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SOURCES_CONFIG = ROOT / "infra" / "generated" / "sources.generated.yml"
@@ -187,7 +188,14 @@ def docker_inspect(container: str) -> dict[str, Any]:
 
 def main() -> int:
     env_values = parse_env(ENV_FILE)
-    compose_config = run(["docker", "compose", "-f", str(COMPOSE), "config"], timeout=60)
+    compose_args = ["docker", "compose", "--env-file", str(ENV_FILE), "-f", str(COMPOSE)]
+    if STORAGE_OVERRIDE.is_file():
+        compose_args.extend(["-f", str(STORAGE_OVERRIDE)])
+    for profile in os.getenv("MIDTERM_COMPOSE_PROFILES", "").split(","):
+        profile = profile.strip()
+        if profile:
+            compose_args.extend(["--profile", profile])
+    compose_config = run([*compose_args, "config"], timeout=60)
     enabled_sources, source_count_error = enabled_rtsp_source_count(SOURCES_CONFIG)
     recommended_max_parallel_streams = max(2, enabled_sources * 2)
     configured_streams, configured_streams_error = configured_max_parallel_streams(
@@ -206,12 +214,12 @@ def main() -> int:
             "redis",
             "replay-service",
             "savant",
-            "source-adapter",
             "event-worker",
             "face-worker",
             "clip-worker",
             "video-file-sink",
             "media-worker",
+            "person-observation-worker",
             "evidence-viewer",
         )
     }

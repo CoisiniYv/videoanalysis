@@ -133,7 +133,9 @@ main() {
     wait_for_operator || fail "8090 did not pass authenticated readiness checks within ${WAIT_SECONDS}s"
 
     bash "$SCRIPT_DIR/runtime/capture_deployment_baseline.sh"
+    bash "$SCRIPT_DIR/runtime/capture_deployment_manifest.sh"
     echo "[OK] Deployment baseline: $DATA_ROOT/media/evidence/.deployment-baseline.txt"
+    echo "[OK] Deployment manifest: $DATA_ROOT/media/evidence/.deployment-manifest.json"
     echo "[OK] Authenticated baseline view: $OPERATOR_URL/system/deployment-baseline"
 }
 

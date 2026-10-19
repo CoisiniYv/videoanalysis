@@ -257,6 +257,8 @@ def test_current_smoke_surface_is_midterm_only() -> None:
 def test_runtime_doctor_is_midterm_named() -> None:
     runtime_scripts = sorted(path.name for path in (ROOT / "scripts" / "runtime").glob("*.sh"))
     assert runtime_scripts == [
+        "capture_deployment_baseline.sh",
+        "capture_deployment_manifest.sh",
         "doctor_midterm.sh",
         "precreate_operator_dual_runtime.sh",
         "prepare_dual_4090_savant_b_model_cache.sh",

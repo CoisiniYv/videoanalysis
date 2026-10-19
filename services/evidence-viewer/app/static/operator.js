@@ -24,6 +24,7 @@ let runtimePerformance = null;
 let runtimeTopology = null;
 let runtimeTopologyApplyStatus = null;
 let runtimeLatency = null;
+let runtimeDeployment = null;
 let runtimeLoadErrors = {};
 let runtimeActionInFlight = "";
 let runtimeApplyPollTimer = 0;
@@ -63,6 +64,8 @@ const runtimeSourceTableEl = document.getElementById("runtime-source-table");
 const runtimeForwarderTableEl = document.getElementById("runtime-forwarder-table");
 const runtimeEvidenceTableEl = document.getElementById("runtime-evidence-table");
 const runtimeContainerTableEl = document.getElementById("runtime-container-table");
+const runtimeDeploymentSummaryEl = document.getElementById("runtime-deployment-summary");
+const runtimeDeploymentDetailEl = document.getElementById("runtime-deployment-detail");
 const runtimeControlStatusEl = document.getElementById("runtime-control-status");
 const runtimeDecisionCopyEl = document.getElementById("runtime-decision-copy");
 const runtimeDriftSummaryEl = document.getElementById("runtime-drift-summary");
@@ -94,6 +97,7 @@ const quickRuntimeSelectRequiredBtn = document.getElementById("quick-runtime-sel
 const quickRuntimeClearSelectionBtn = document.getElementById("quick-runtime-clear-selection");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const refreshRuntimeLatencyBtn = document.getElementById("refresh-runtime-latency");
+const refreshRuntimeDeploymentBtn = document.getElementById("refresh-runtime-deployment");
 const runtimeLatencySummaryEl = document.getElementById("runtime-latency-summary");
 const runtimeLatencyDetailEl = document.getElementById("runtime-latency-detail");
 const startSingleRuntimeBtn = document.getElementById("start-single-runtime");
@@ -2889,6 +2893,36 @@ function renderRuntimeTopologyPlan(plan, runtime, preflight) {
     `</table>`;
 }
 
+function renderRuntimeDeployment() {
+  if (!runtimeDeploymentSummaryEl || !runtimeDeploymentDetailEl) return;
+  const deployment = runtimeDeployment || {};
+  if (!deployment.available) {
+    runtimeDeploymentSummaryEl.innerHTML =
+      `<div><span>状态</span><strong>未生成清单</strong></div>` +
+      `<div><span>清单路径</span><strong>${escapeHtml(deployment.manifest_path || "--")}</strong></div>`;
+    runtimeDeploymentDetailEl.textContent = deployment.update?.reason || "部署完成后会生成版本清单。";
+    return;
+  }
+  const current = deployment.current || {};
+  const update = deployment.update || {};
+  const updateText = update.available === true
+    ? "有候选版本"
+    : (update.configured ? "已是候选版本" : "更新通道未配置");
+  const stateText = deployment.state === "dirty" ? "配置有未提交改动" : "当前版本";
+  runtimeDeploymentSummaryEl.innerHTML =
+    `<div><span>当前版本</span><strong>${escapeHtml(current.release_id || "--")}</strong></div>` +
+    `<div><span>状态</span><strong>${escapeHtml(stateText)}</strong></div>` +
+    `<div><span>数据库迁移</span><strong>${escapeHtml(String(current.migration_set_sha256 || "--").slice(0, 12))}</strong></div>` +
+    `<div><span>更新状态</span><strong>${escapeHtml(updateText)}</strong></div>`;
+  const details = [
+    `提交：${current.git_commit || "--"}`,
+    `Compose：${String(current.compose_config_sha256 || "--").slice(0, 12)}`,
+    `记录时间：${current.captured_at || "--"}`,
+    update.reason || "",
+  ].filter(Boolean);
+  runtimeDeploymentDetailEl.textContent = details.join("；");
+}
+
 function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
@@ -2960,6 +2994,7 @@ function renderRuntimeOverview() {
   renderRuntimeForwarderTable(effectiveForwarder);
   renderRuntimeEvidenceTable(overview.evidence || {});
   renderRuntimeContainerTable(containers);
+  renderRuntimeDeployment();
   renderRuntimeControlStatus();
   renderRuntimePerformanceConfig();
   renderRuntimeTopologyConfig();
@@ -3368,8 +3403,9 @@ async function loadRuntimeOverview({ silent = false } = {}) {
     request(`${API}/runtime/topology-config`),
     request(`${API}/runtime/topology-config/apply-status`),
     request(`${API}/runtime/latency`),
+    request(`${API}/runtime/deployment`),
   ]);
-  const keys = ["overview", "control", "performance", "topology", "topology_apply", "latency"];
+  const keys = ["overview", "control", "performance", "topology", "topology_apply", "latency", "deployment"];
   const values = [
     (value) => { runtimeOverview = value || {}; },
     (value) => { runtimeControl = value || {}; },
@@ -3377,6 +3413,7 @@ async function loadRuntimeOverview({ silent = false } = {}) {
     (value) => { runtimeTopology = value || {}; },
     (value) => { runtimeTopologyApplyStatus = value || {}; },
     (value) => { runtimeLatency = value || {}; },
+    (value) => { runtimeDeployment = value || {}; },
   ];
   runtimeLoadErrors = {};
   results.forEach((result, index) => {
@@ -4616,6 +4653,9 @@ previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
 refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();
   loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
+});
+refreshRuntimeDeploymentBtn?.addEventListener("click", () => {
+  loadRuntimeOverview({ silent: true }).catch((e) => showError(`版本状态刷新失败：${e.message}`));
 });
 toggleRuntimeAdvancedBtn?.addEventListener("click", () => {
   setRuntimeAdvancedVisible(!runtimeAdvancedVisible);
