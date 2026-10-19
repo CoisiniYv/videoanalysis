@@ -14,6 +14,15 @@ FORWARDER_ENV_KEYS = (
 ROI_ENV_KEYS = (
     "FACE_ROI_EXPORT_ENABLED", "FACE_OBSERVATION_EXPORT_ENABLED", "ADAFACE_INPUT_OBJECT",
 )
+CONNECTION_ENV_KEYS = (
+    "DATABASE_URL",
+    "VIDEO_ANALYTICS_DATABASE_URL",
+    "REDIS_URL",
+    "API_BASE_URL",
+    "REPLAY_API_URL",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
+)
 FORWARDER_CODE_FILES = ("main.py", "queueing.py", "sampler.py")
 CONTAINER_PREFIX = "video-analytics-midterm-"
 
@@ -65,6 +74,63 @@ def expected_forwarder_environment(
             raise RuntimeReadbackError(f"missing expected forwarder settings for {service}: {missing}")
         result[service] = {key: _env_string(environment[key]) for key in FORWARDER_ENV_KEYS}
     return result
+
+
+def _public_connection_value(value: Any) -> str:
+    """Keep connection mismatch reports free of credentials and database names."""
+    raw = str(value or "")
+    match = re.match(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?:(?P<credentials>[^@/]*)@)?(?P<host>[^/:]+|\[[^]]+\])(?::(?P<port>\d+))?", raw)
+    if match:
+        port = f":{match.group('port')}" if match.group("port") else ""
+        return f"{match.group('scheme')}://{match.group('host')}{port}"
+    return raw.split("/", 1)[0]
+
+
+def validate_rendered_connection_environment(
+    config: Mapping[str, Any],
+    production_environment: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any]:
+    """Compare connection settings in rendered Compose against live workers."""
+    services = config.get("services") or {}
+    report: dict[str, Any] = {"status": "checking", "services": {}, "errors": []}
+    for service, live_env in production_environment.items():
+        rendered = services.get(service) or {}
+        rendered_env = rendered.get("environment") or {}
+        if not isinstance(rendered_env, Mapping):
+            continue
+        mismatches: dict[str, Any] = {}
+        compared: list[str] = []
+        for key in CONNECTION_ENV_KEYS:
+            if key not in rendered_env:
+                continue
+            expected = rendered_env.get(key)
+            actual = live_env.get(key)
+            # DATABASE_URL is the effective value inside the container; the
+            # launcher-side VIDEO_ANALYTICS_DATABASE_URL is its Compose input.
+            if actual is None and key == "VIDEO_ANALYTICS_DATABASE_URL":
+                actual = live_env.get("DATABASE_URL")
+            if expected is None or actual is None:
+                continue
+            compared.append(key)
+            if str(expected) != str(actual):
+                mismatches[key] = {
+                    "rendered": _public_connection_value(expected),
+                    "live": _public_connection_value(actual),
+                }
+        report["services"][service] = {
+            "compared_keys": compared,
+            "mismatches": mismatches,
+            "status": "failed" if mismatches else "passed",
+        }
+        if mismatches:
+            report["errors"].append(
+                f"connection environment mismatch for {service}: {sorted(mismatches)}"
+            )
+    if report["errors"]:
+        report["status"] = "failed"
+        raise RuntimeReadbackError("; ".join(report["errors"]), report)
+    report["status"] = "passed"
+    return report
 
 
 def validate_rendered_pressure_config(cfg: Any, config: Mapping[str, Any]) -> dict[str, Any]:

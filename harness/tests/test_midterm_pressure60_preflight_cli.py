@@ -127,6 +127,14 @@ def _fixture(tmp_path: Path, mode: str) -> tuple[list[str], dict[str, str], Path
         with open(os.environ['PREFLIGHT_COMMAND_LOG'], 'a') as output:
             output.write(json.dumps(['docker', *args]) + '\\n')
         if args and args[0] == 'inspect':
+            if 'Config.Env' in ' '.join(args):
+                print(json.dumps([
+                    'DATABASE_URL=postgresql://video:video@postgres:5432/video_analytics',
+                    'VIDEO_ANALYTICS_DATABASE_URL=postgresql://video:video@postgres:5432/video_analytics',
+                    'REDIS_URL=redis://redis:6379/0',
+                    'QDRANT_URL=http://qdrant:6333',
+                ]))
+                raise SystemExit(0)
             print(json.dumps([{'Config': {'Labels': {
                 'com.docker.compose.project.working_dir': os.getcwd(),
                 'com.docker.compose.project.config_files': os.path.join(os.getcwd(), 'infra/docker-compose.midterm.yml'),
@@ -210,16 +218,16 @@ def test_real_script_preflight_always_writes_result(tmp_path, mode, reason):
         # A passing dual-shard preflight renders both the pressure config and
         # the formal recovery config; the inspect call is the third Docker
         # invocation.
-        "nvme": 3,
+        "nvme": 8,
         # Storage and probe failures happen before recovery rendering.
-        "hdd": 1,
-        "unknown_device": 1,
-        "unknown_bitrate": 1,
-        "compose_failure": 1,
-        "compose_invalid_json": 1,
-        "ffprobe_failure": 1,
-        "ffprobe_invalid_json": 1,
-        "setup_exception": 0,
+        "hdd": 5,
+        "unknown_device": 5,
+        "unknown_bitrate": 5,
+        "compose_failure": 5,
+        "compose_invalid_json": 5,
+        "ffprobe_failure": 5,
+        "ffprobe_invalid_json": 5,
+        "setup_exception": 5,
     }
     assert len([command for command in commands if command[0] == "docker"]) == expected_docker_calls[mode]
     assert all(

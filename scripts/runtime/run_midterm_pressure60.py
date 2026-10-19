@@ -28,13 +28,14 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 import psycopg
 import yaml
@@ -171,6 +172,22 @@ DUAL_SHARD_DIRECT_ROLLING_DISABLED_SERVICES = [
     *DUAL_SHARD_REDUNDANT_FORWARDER_SERVICES,
 ]
 DUAL_SHARD_SINGLE_SERVICES = ["source-adapter", "analysis-forwarder", "savant-security"]
+PRESSURE_CONNECTION_SERVICES = (
+    "event-worker",
+    "media-worker",
+    "clip-worker",
+    "face-worker",
+    "person-observation-worker",
+)
+PRESSURE_CONNECTION_ENV_KEYS = (
+    "DATABASE_URL",
+    "VIDEO_ANALYTICS_DATABASE_URL",
+    "REDIS_URL",
+    "API_BASE_URL",
+    "REPLAY_API_URL",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
+)
 DUAL_SHARD_FORWARDER_METRICS = {
     "replay-a": "http://127.0.0.1:18182/metrics",
     "replay-b": "http://127.0.0.1:18183/metrics",
@@ -574,6 +591,10 @@ class PressureConfig:
     preflight_without_storage_override: bool = False
     rolling_cache_bytes_per_second: float = 0.0
     preflight_runtime_readback: bool = False
+    # Captured from the formal worker containers before any pressure-side
+    # Compose operation. Values are injected into child processes, while the
+    # report stores only redacted host/port summaries.
+    formal_connection_env: dict[str, str] = field(default_factory=dict)
 
 
 PRESSURE_BEHAVIOR_RULES = ("fall", "crowd_gathering", "chasing")
@@ -1379,10 +1400,143 @@ def perform_storage_preflight(cfg: PressureConfig) -> tuple[dict[str, Any], dict
 
 
 def perform_runtime_preflight_readback(
-    cfg: PressureConfig, rendered_pressure_config: dict[str, Any]
+    cfg: PressureConfig,
+    rendered_pressure_config: dict[str, Any],
+    connection_environment: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Validate the rendered pressure runtime without reading stale containers."""
-    return validate_rendered_pressure_config(cfg, rendered_pressure_config)
+    report = validate_rendered_pressure_config(cfg, rendered_pressure_config)
+    if connection_environment:
+        from scripts.runtime.pressure_runtime_readback import (
+            validate_rendered_connection_environment,
+        )
+
+        report["connections"] = validate_rendered_connection_environment(
+            rendered_pressure_config,
+            connection_environment,
+        )
+    return report
+
+
+def _public_connection_value(value: str) -> str:
+    """Return only scheme, host, and port; never put credentials in reports."""
+    raw = str(value or "")
+    parsed = urlsplit(raw)
+    if parsed.scheme and parsed.hostname:
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}"
+    return re.sub(r"(?<=://)[^/@\s]+@", "***@", raw).split("/", 1)[0]
+
+
+def capture_formal_connection_environment() -> tuple[dict[str, Any], dict[str, str], dict[str, dict[str, str]]]:
+    """Capture connection values before pressure Compose can recreate workers."""
+    services: dict[str, dict[str, str]] = {}
+    missing: list[str] = []
+    for service in PRESSURE_CONNECTION_SERVICES:
+        env = docker_container_env(f"video-analytics-midterm-{service}")
+        if not env:
+            missing.append(service)
+        services[service] = {
+            key: env[key]
+            for key in PRESSURE_CONNECTION_ENV_KEYS
+            if env.get(key) is not None
+        }
+
+    injection: dict[str, str] = {}
+    for key in PRESSURE_CONNECTION_ENV_KEYS:
+        for env in services.values():
+            if env.get(key):
+                injection[key] = env[key]
+                break
+    # Compose uses VIDEO_ANALYTICS_DATABASE_URL to derive DATABASE_URL. Formal
+    # containers always expose DATABASE_URL even when that interpolation key was
+    # only exported by the production launcher.
+    if not injection.get("VIDEO_ANALYTICS_DATABASE_URL") and injection.get("DATABASE_URL"):
+        injection["VIDEO_ANALYTICS_DATABASE_URL"] = injection["DATABASE_URL"]
+    if not injection.get("DATABASE_URL"):
+        raise StoragePreflightError(
+            "formal worker connection environment missing DATABASE_URL"
+        )
+
+    report = {
+        "status": "passed",
+        "services": {
+            service: {
+                "container": f"video-analytics-midterm-{service}",
+                "keys": sorted(values),
+                "values": {key: _public_connection_value(value) for key, value in values.items()},
+            }
+            for service, values in services.items()
+        },
+        "injected_keys": sorted(injection),
+        "injected_values": {
+            key: _public_connection_value(value) for key, value in injection.items()
+        },
+        "missing_services": missing,
+    }
+    # A missing optional worker is recorded but does not block a run; the
+    # required database value above is fail-closed.
+    return report, injection, services
+
+
+def verify_pressure_worker_connections(
+    cfg: PressureConfig,
+    *,
+    wait_s: int = 60,
+    poll_s: int = 5,
+) -> dict[str, Any]:
+    """Run SELECT 1 in recreated workers and ensure no restart during the guard."""
+    query = (
+        "import os, psycopg; "
+        "c=psycopg.connect(os.environ['DATABASE_URL']); c.execute('SELECT 1'); c.close()"
+    )
+    result: dict[str, Any] = {"status": "checking", "wait_seconds": wait_s, "workers": {}}
+    for service in ("event-worker", "media-worker", "clip-worker"):
+        container = f"video-analytics-midterm-{service}"
+        before = docker_container_state(container)
+        row: dict[str, Any] = {
+            "container": container,
+            "before": before,
+            "select_1": {"returncode": None, "stdout": "", "error": ""},
+        }
+        result["workers"][service] = row
+        if not before.get("running"):
+            row["select_1"]["error"] = "worker is not running"
+            continue
+        completed = subprocess.run(
+            ["docker", "exec", container, "python", "-c", query],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        row["select_1"] = {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout.strip()[-1000:],
+            "error": "" if completed.returncode == 0 else "SELECT 1 failed",
+        }
+
+    deadline = time.monotonic() + max(0, wait_s)
+    while time.monotonic() < deadline:
+        time.sleep(min(max(1, poll_s), max(0.0, deadline - time.monotonic())))
+    for service, row in result["workers"].items():
+        after = docker_container_state(row["container"])
+        row["after"] = after
+        before_count = int((row["before"] or {}).get("restart_count") or 0)
+        after_count = int((after or {}).get("restart_count") or 0)
+        row["restart_count_delta"] = after_count - before_count
+        if row["select_1"]["returncode"] != 0 or row["restart_count_delta"] != 0:
+            row["ok"] = False
+        else:
+            row["ok"] = True
+    result["status"] = "passed" if all(row.get("ok") for row in result["workers"].values()) else "failed"
+    write_json(cfg.artifact_dir / "runtime_connection_preflight.json", result)
+    if result["status"] != "passed":
+        raise RuntimeError("pressure worker connection preflight failed")
+    return result
 
 
 def restore_after_preflight_abort() -> dict[str, Any]:
@@ -1924,6 +2078,28 @@ def main(argv: list[str] | None = None) -> int:
             report[name] = result
         return result
 
+    try:
+        connection_report, connection_env, captured_connection_env = (
+            capture_formal_connection_environment()
+        )
+        cfg = replace(cfg, formal_connection_env=connection_env)
+        os.environ.update(connection_env)
+        report["formal_connection_environment"] = connection_report
+        report["config"] = _jsonable_config(cfg)
+        report["formal_connection_environment"]["comparison_scope"] = list(
+            PRESSURE_CONNECTION_SERVICES
+        )
+    except Exception as exc:
+        diagnostic = preflight_failure_report(exc, section="connection_environment")
+        report["formal_connection_environment"] = diagnostic
+        report["status"] = "preflight_failed"
+        report["phase"] = "connection_environment"
+        report["reason"] = diagnostic["reason"]
+        report["errors"] = diagnostic["errors"]
+        report["exit_code"] = 2
+        report["preflight_recovery"] = restore_after_preflight_abort()
+        write_json(cfg.artifact_dir / "report.json", report)
+        return 2
     write_json(cfg.artifact_dir / "run_config.json", report["config"])
     try:
         report["compose_config"] = compose_config_paths(cfg)
@@ -1952,7 +2128,9 @@ def main(argv: list[str] | None = None) -> int:
                 if cfg.rolling_cache_evidence or cfg.dual_shard_same_gpu:
                     report["restore_compose_config"] = render_formal_restore_config(cfg)
                 report["runtime_config_readback"] = perform_runtime_preflight_readback(
-                    cfg, rendered_pressure_config
+                    cfg,
+                    rendered_pressure_config,
+                    captured_connection_env,
                 )
             except Exception as exc:
                 diagnostic = preflight_failure_report(
@@ -2299,6 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 max_jobs_per_run="0" if cfg.keep_evidence < 0 else None,
             )
+        report["runtime_connection_preflight"] = verify_pressure_worker_connections(cfg)
         if cfg.cuda_mps:
             report["cuda_mps_start"] = start_cuda_mps(cfg)
         rtsp_republish_local_server = start_rtsp_republish_local_server(cfg)
@@ -3118,6 +3297,14 @@ def _jsonable_config(cfg: PressureConfig) -> dict[str, Any]:
     for key, value in list(data.items()):
         if isinstance(value, Path):
             data[key] = str(value)
+    if "formal_connection_env" in data:
+        data["formal_connection_env"] = {
+            "keys": sorted(data["formal_connection_env"]),
+            "values": {
+                key: _public_connection_value(value)
+                for key, value in data["formal_connection_env"].items()
+            },
+        }
     return data
 
 
@@ -5205,7 +5392,7 @@ def _expand_cpuset(value: str) -> set[int]:
 
 def docker_container_state(name: str) -> dict[str, Any]:
     completed = subprocess.run(
-        ["docker", "inspect", name, "--format", "{{json .State}}"],
+        ["docker", "inspect", name, "--format", "{{json .}}"],
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -5220,7 +5407,7 @@ def docker_container_state(name: str) -> dict[str, Any]:
             "inspect_error": completed.stdout.strip(),
         }
     try:
-        state = json.loads(completed.stdout)
+        inspected = json.loads(completed.stdout)
     except json.JSONDecodeError:
         return {
             "container": name,
@@ -5229,12 +5416,14 @@ def docker_container_state(name: str) -> dict[str, Any]:
             "status": "inspect_parse_failed",
             "inspect_error": completed.stdout.strip(),
         }
+    state = inspected.get("State") if isinstance(inspected, dict) else None
     health = state.get("Health") if isinstance(state, dict) else None
     return {
         "container": name,
         "exists": True,
         "running": bool((state or {}).get("Running")),
         "status": str((state or {}).get("Status") or ""),
+        "restart_count": int((inspected or {}).get("RestartCount") or 0),
         "health": (
             str(health.get("Status") or "")
             if isinstance(health, dict)
